@@ -5,6 +5,11 @@ struct Emulator {
   static auto construct() -> void;
 
   struct Firmware;
+  struct GameBrowserCategory {
+    string name;
+    string board;
+  };
+
   virtual ~Emulator() = default;
 
   //emulator.cpp
@@ -32,6 +37,7 @@ struct Emulator {
   virtual auto notify(const string& message) -> void {}
   virtual auto arcade() -> bool { return false; }
   virtual auto group() -> string { return manufacturer; }
+  virtual auto gameBrowserCategories() -> std::vector<GameBrowserCategory> { return {}; }
   virtual auto portMenu(Menu& portMenu, ares::Node::Port port) -> void {}
 
   struct Firmware {

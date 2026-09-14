@@ -58,6 +58,8 @@ struct Settings : Markup::Node {
   struct Input {
     string driver;
     string defocus = "Pause";
+    string digitalToAnalog = "Immediate";
+    u32 digitalToAnalogTime = 500;
   } input;
 
   struct Boot {
