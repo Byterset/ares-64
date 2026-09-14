@@ -820,7 +820,10 @@ auto CPU::Recompiler::emit(u64 vaddr, u32 address, u64 stateKey) -> Block* {
       const u32 lineIndex = u32(slow.vaddr >> 5) & 0x1ffu;
       const u32 burst = (slow.icachePaddr & ~0xfffu) | ((lineIndex << 5) & 0xfe0u);
       const u32 tagKey = (slow.icachePaddr & ~0xfffu) | 1u;
-      if(!emitStateKey.rdramMapIdentity()) {
+      // The inline fill below bypasses Line::fill, so while the profiler (or
+      // tracer) hook is compiled in, take the call instead: that is where icache
+      // fills are recorded. updatePrologueHook() resets the recompiler on toggle.
+      if(!emitStateKey.rdramMapIdentity() || callInstructionPrologue) {
         callf(&CPU::icacheFillLine, imm64(slow.vaddr), imm(slow.icachePaddr));
       } else {
         const bool sdram = Model::Aleck64() && burst > 0xbfff'ffffu;

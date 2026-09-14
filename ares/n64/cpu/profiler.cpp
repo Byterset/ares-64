@@ -262,6 +262,27 @@ auto CPU::Profiler::onBusAccess(bool toRDRAM, u64 bytes) -> void {
   else        callStack.back().bytesInOwn  += bytes;
 }
 
+// Cache line transfer (icache fill, dcache fill or dcache write-back), attributed
+// to the function on top of the call stack like onBusAccess (the burst itself is
+// also counted there as RDRAM in/out bytes; this keeps the cache share separate).
+// Must be called before the transfer's step(), so `time` is its start. Also
+// appended to the event ring for the flame chart.
+auto CPU::Profiler::onCacheEvent(u8 kind, u32 paddr) -> void {
+  u32 funcAddr = 0;
+  bool isException = false;
+  if(!callStack.empty()) {
+    auto& top = callStack.back();
+    top.cacheOwn[kind] += cacheBytes[kind];
+    funcAddr = top.funcAddr;
+    isException = top.isException;
+  }
+  if(recordTimeline.load(std::memory_order_relaxed) && cacheEvents.size() == maxCacheEvents) {
+    u64 w = cacheEventWrite.load(std::memory_order_relaxed);
+    cacheEvents[w % maxCacheEvents] = {now(), paddr, funcAddr, kind, isException};
+    cacheEventWrite.store(w + 1, std::memory_order_release);
+  }
+}
+
 // Record the top frame's timing into the stats and propagate its inclusive time
 // and subtree-wait into its caller (which subtracts it from the caller's
 // exclusive). Returns whether the popped frame was a synthetic exception frame.
@@ -282,6 +303,8 @@ auto CPU::Profiler::popFrame() -> bool {
   // Bytes: own = exclusive (this function's code), incl = own + returned callees.
   u64 inclBytesIn  = frame.bytesInOwn  + frame.childBytesIn;
   u64 inclBytesOut = frame.bytesOutOwn + frame.childBytesOut;
+  u64 inclCache[CacheKinds];
+  for(u32 k : range(CacheKinds)) inclCache[k] = frame.cacheOwn[k] + frame.childCache[k];
   auto add = [&](std::unordered_map<u32, FuncStat>& m) {
     auto& st = m[frame.funcAddr];
     st.addr = frame.funcAddr;
@@ -294,6 +317,10 @@ auto CPU::Profiler::popFrame() -> bool {
     st.inclBytesOut += inclBytesOut;
     st.exclBytesIn  += frame.bytesInOwn;
     st.exclBytesOut += frame.bytesOutOwn;
+    for(u32 k : range(CacheKinds)) {
+      st.inclCacheBytes[k] += inclCache[k];
+      st.exclCacheBytes[k] += frame.cacheOwn[k];
+    }
   };
   if(frameCount < maxFrames) add(stats);  //freeze continuous totals at the cap
   add(frameAccum);                         //per-frame snapshot is always live
@@ -314,6 +341,7 @@ auto CPU::Profiler::popFrame() -> bool {
     callStack.back().childWait   += subtreeWait;
     callStack.back().childBytesIn  += inclBytesIn;
     callStack.back().childBytesOut += inclBytesOut;
+    for(u32 k : range(CacheKinds)) callStack.back().childCache[k] += inclCache[k];
   }
   return frame.isException;
 }
@@ -427,6 +455,7 @@ auto CPU::Profiler::setEnabled(bool value) -> void {
   haveSp = false; excActive = 0; spLo = spHi = 0; stackClock = 0;
   syncOpenFrames();
   if(value && timeline.size() != maxSpans) timeline.resize(maxSpans);
+  if(value && cacheEvents.size() != maxCacheEvents) cacheEvents.resize(maxCacheEvents);
   cpu.updatePrologueHook();
 }
 
@@ -439,6 +468,7 @@ auto CPU::Profiler::setEnabled(bool value) -> void {
 auto CPU::Profiler::power() -> void {
   clearStats();  //stats + call stacks + the span ring
   viMarkWrite.store(0, std::memory_order_release);
+  cacheEventWrite.store(0, std::memory_order_release);
 }
 
 auto CPU::Profiler::clearStats() -> void {
@@ -451,6 +481,13 @@ auto CPU::Profiler::clearStats() -> void {
   syncOpenFrames();
   frameCount = 0;
   timelineWrite.store(0, std::memory_order_release);
+}
+
+auto CPU::profileCacheEvent(u8 kind, u32 address) -> void {
+#if ARES_DEBUG_TOOLS
+  if(!profiler.enabled.load(std::memory_order_relaxed)) return;
+  profiler.onCacheEvent(kind, address);
+#endif
 }
 
 auto CPU::updatePrologueHook() -> void {

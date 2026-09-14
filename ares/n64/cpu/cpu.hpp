@@ -205,8 +205,9 @@ struct CPU : Thread {
       }
 
       auto fill(u32 paddr, CPU& cpu) -> void {
-        cpu.step(48 * 2);
         const u32 tag = paddr & ~0x0000'0fffu;
+        cpu.profileCacheEvent(Profiler::CacheIFill, tag | index);
+        cpu.step(48 * 2);
         tagKey = tag;
         setValid(true);
         cpu.busReadBurst<ICache>(tag | index, words);
@@ -354,6 +355,7 @@ struct CPU : Thread {
     line.fill(paddr, *this);
   }
   auto profileBusAccess(bool toRDRAM, u32 address, u64 bytes) -> void;  //memory.cpp
+  auto profileCacheEvent(u8 kind, u32 address) -> void;  //profiler.cpp: one cache line transfer (Profiler::CacheKind)
   template<u32 Size> auto busWrite(u32 address, u64 data) -> void;
   template<u32 Size> auto busRead(u32 address) -> u64;
   template<u32 Size> auto busWriteBurst(u32 address, u32 *data) -> bool;
@@ -1332,6 +1334,8 @@ struct CPU : Thread {
       u64 inclBytesOut = 0;  //CPU -> RDRAM bytes incl. callees
       u64 exclBytesIn = 0;   //RDRAM -> CPU bytes from this function's own code
       u64 exclBytesOut = 0;  //CPU -> RDRAM bytes from this function's own code
+      u64 inclCacheBytes[3] = {};  //cache line bytes transferred incl. callees, per CacheKind
+      u64 exclCacheBytes[3] = {};  //cache line bytes transferred while this function was on top
       bool isSpin = false;
     };
     struct Sym {
@@ -1351,6 +1355,8 @@ struct CPU : Thread {
       u64 bytesOutOwn = 0;   //CPU -> RDRAM bytes while this frame was on top (exclusive)
       u64 childBytesIn = 0;  //inclusive RDRAM -> CPU bytes of callees that have returned
       u64 childBytesOut = 0; //inclusive CPU -> RDRAM bytes of callees that have returned
+      u64 cacheOwn[3] = {};    //cache bytes per CacheKind while this frame was on top (exclusive)
+      u64 childCache[3] = {};  //inclusive cache bytes per CacheKind of callees that have returned
       bool isException = false;  //synthetic frame for an exception/interrupt handler
     };
 
@@ -1431,6 +1437,30 @@ struct CPU : Thread {
     u64 viMarks[maxViMarks] = {};
     std::atomic<u64> viMarkWrite{0};
 
+    // Cache line transfers
+    enum CacheKind : u8 {
+      CacheIFill  = 0,  //icache line fill: 8 words RDRAM -> CPU
+      CacheDFill  = 1,  //dcache line fill: 4 words RDRAM -> CPU
+      CacheDWrite = 2,  //dcache write-back: 4 words CPU -> RDRAM
+      CacheKinds  = 3,
+    };
+    static constexpr u32 cacheBytes[CacheKinds] = {32, 16, 16};
+    //now() ticks per transfer, matching the step() in the Line::fill/writeBack
+    //implementations: icache 48 CPU cycles, dcache 40 CPU cycles
+    static constexpr u32 cacheTicks[CacheKinds] = {96, 80, 80};
+    //transfer time for a byte count of one kind (each line is one fixed-cost transfer)
+    static constexpr auto cacheTime(u32 kind, u64 bytes) -> u64 { return bytes / cacheBytes[kind] * cacheTicks[kind]; }
+    struct CacheEvent {
+      u64 time = 0;      //absolute now() tick at which the transfer started
+      u32 paddr = 0;     //physical address of the cache line
+      u32 funcAddr = 0;  //function on top of the call stack (0 = none tracked)
+      u8  kind = CacheIFill;
+      bool isException = false;
+    };
+    static constexpr u32 maxCacheEvents = 1u << 18;
+    std::vector<CacheEvent> cacheEvents;  //ring buffer, sized to maxCacheEvents when enabled
+    std::atomic<u64> cacheEventWrite{0};
+
     std::vector<Sym> syms;                 //sorted by addr, for enclosing lookup
     std::unordered_map<u32, u32> symByAddr;//exact entry addr -> index into syms
     bool symbolsLoaded = false;
@@ -1445,6 +1475,7 @@ struct CPU : Thread {
     //memory-bus access committed to RDRAM, attributed to the current frame.
     //toRDRAM=true is outgoing (CPU -> RDRAM), false is incoming (RDRAM -> CPU).
     auto onBusAccess(bool toRDRAM, u64 bytes) -> void;
+    auto onCacheEvent(u8 kind, u32 paddr) -> void;  //cache line transfer: attribute + record event
     auto onException(u32 code) -> void;  //exception/interrupt entry: push handler frame
     auto onEret() -> void;               //exception return: pop handler frame
     auto popFrame() -> bool;             //record+propagate top frame; returns isException

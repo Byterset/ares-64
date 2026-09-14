@@ -117,20 +117,34 @@ auto DrawCpuProfiler() -> void {
   auto& srcMap = (windowMode == 0) ? prof.stats : prof.frameStats;
 
   struct Row { u32 addr; string name; bool isSpin; bool isExc; u64 calls; u64 incl; u64 excl; u64 wait;
-               u64 bytesIn; u64 bytesOut; u64 inclBytesIn; u64 inclBytesOut; };
+               u64 bytesIn; u64 bytesOut; u64 inclBytesIn; u64 inclBytesOut;
+               u64 icache; u64 inclIcache;              //icache fill bytes
+               u64 dcIn; u64 inclDcIn; u64 dcOut; u64 inclDcOut;  //dcache fill / write-back bytes
+               u64 dcTime; u64 inclDcTime; };           //dcache transfer time (in + out)
   std::vector<Row> rows;
   rows.reserve(srcMap.size());
-  u64 totalExcl = 0, spinExcl = 0, totalBytesIn = 0, totalBytesOut = 0;
+  using Prof = ares::Nintendo64::CPU::Profiler;
+  u64 totalExcl = 0, spinExcl = 0, totalBytesIn = 0, totalBytesOut = 0, totalIcache = 0, totalDcIn = 0, totalDcOut = 0;
   for(auto& [addr, st] : srcMap) {
     bool isExc = prof.isExceptionAddr(addr);
     string name = prof.labelFor(addr);
     bool spin = !isExc && st.isSpin;
     rows.push_back({addr, name, spin, isExc, st.callCount, st.inclCycles, st.exclCycles, st.waitCycles,
-                    st.exclBytesIn, st.exclBytesOut, st.inclBytesIn, st.inclBytesOut});
+                    st.exclBytesIn, st.exclBytesOut, st.inclBytesIn, st.inclBytesOut,
+                    st.exclCacheBytes[Prof::CacheIFill], st.inclCacheBytes[Prof::CacheIFill],
+                    st.exclCacheBytes[Prof::CacheDFill], st.inclCacheBytes[Prof::CacheDFill],
+                    st.exclCacheBytes[Prof::CacheDWrite], st.inclCacheBytes[Prof::CacheDWrite],
+                    Prof::cacheTime(Prof::CacheDFill, st.exclCacheBytes[Prof::CacheDFill])
+                      + Prof::cacheTime(Prof::CacheDWrite, st.exclCacheBytes[Prof::CacheDWrite]),
+                    Prof::cacheTime(Prof::CacheDFill, st.inclCacheBytes[Prof::CacheDFill])
+                      + Prof::cacheTime(Prof::CacheDWrite, st.inclCacheBytes[Prof::CacheDWrite])});
     totalExcl += st.exclCycles;
     if(spin) spinExcl += st.exclCycles;
     totalBytesIn += st.exclBytesIn;
     totalBytesOut += st.exclBytesOut;
+    totalIcache += st.exclCacheBytes[Prof::CacheIFill];
+    totalDcIn   += st.exclCacheBytes[Prof::CacheDFill];
+    totalDcOut  += st.exclCacheBytes[Prof::CacheDWrite];
   }
 
   // (rows are sorted below according to the table's clickable column headers)
@@ -176,7 +190,7 @@ auto DrawCpuProfiler() -> void {
   // Hideable: right-click any header to toggle column visibility. ImGui persists
   // the per-column choice (plus order/width/sort) to imgui.ini under this table's
   // id, so it is remembered across sessions.
-  if(ImGui::BeginTable("cpu_funcs", 11,
+  if(ImGui::BeginTable("cpu_funcs", 21,
        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Sortable |
        ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable |
        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit,
@@ -193,6 +207,22 @@ auto DrawCpuProfiler() -> void {
     ImGui::TableSetupColumn("In in",  ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 64);
     ImGui::TableSetupColumn("Out ex", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 64);
     ImGui::TableSetupColumn("Out in", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 64);
+    // Instruction-cache fills, in bytes fetched (32 per line): "ex" = while this
+    // function was on top of the call stack, "in" = including callees.
+    ImGui::TableSetupColumn("ICache ex", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72);
+    ImGui::TableSetupColumn("ICache in", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 72);
+    // Time spent filling the icache (each fill costs a fixed Profiler::cacheTicks);
+    // already part of Excl/Incl, shown separately.
+    ImGui::TableSetupColumn("ICache t ex", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80);
+    ImGui::TableSetupColumn("ICache t in", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80);
+    // Data-cache transfers, in bytes (16 per line): "in" = line fills (RDRAM ->
+    // CPU), "out" = write-backs (CPU -> RDRAM); "t" = time for both directions.
+    ImGui::TableSetupColumn("DCache in ex",  ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 88);
+    ImGui::TableSetupColumn("DCache in in",  ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 88);
+    ImGui::TableSetupColumn("DCache out ex", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 92);
+    ImGui::TableSetupColumn("DCache out in", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 92);
+    ImGui::TableSetupColumn("DCache t ex",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80);
+    ImGui::TableSetupColumn("DCache t in",   ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 80);
     ImGui::TableSetupColumn("%", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, 55);
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableHeadersRow();
@@ -212,6 +242,16 @@ auto DrawCpuProfiler() -> void {
         case 7:  return asc ? a.inclBytesIn  < b.inclBytesIn  : a.inclBytesIn  > b.inclBytesIn;
         case 8:  return asc ? a.bytesOut     < b.bytesOut     : a.bytesOut     > b.bytesOut;
         case 9:  return asc ? a.inclBytesOut < b.inclBytesOut : a.inclBytesOut > b.inclBytesOut;
+        case 10: return asc ? a.icache       < b.icache       : a.icache       > b.icache;
+        case 11: return asc ? a.inclIcache   < b.inclIcache   : a.inclIcache   > b.inclIcache;
+        case 12: return asc ? a.icache       < b.icache       : a.icache       > b.icache;      //time is bytes-proportional
+        case 13: return asc ? a.inclIcache   < b.inclIcache   : a.inclIcache   > b.inclIcache;
+        case 14: return asc ? a.dcIn         < b.dcIn         : a.dcIn         > b.dcIn;
+        case 15: return asc ? a.inclDcIn     < b.inclDcIn     : a.inclDcIn     > b.inclDcIn;
+        case 16: return asc ? a.dcOut        < b.dcOut        : a.dcOut        > b.dcOut;
+        case 17: return asc ? a.inclDcOut    < b.inclDcOut    : a.inclDcOut    > b.inclDcOut;
+        case 18: return asc ? a.dcTime       < b.dcTime       : a.dcTime       > b.dcTime;
+        case 19: return asc ? a.inclDcTime   < b.inclDcTime   : a.inclDcTime   > b.inclDcTime;
         case 3:
         default: return asc ? a.excl  < b.excl  : a.excl  > b.excl;
         }
@@ -250,6 +290,16 @@ auto DrawCpuProfiler() -> void {
       ImGui::TableNextColumn(); fmtBytes(r.inclBytesIn,  buf, sizeof(buf)); numCell(buf);
       ImGui::TableNextColumn(); fmtBytes(r.bytesOut,     buf, sizeof(buf)); numCell(buf);
       ImGui::TableNextColumn(); fmtBytes(r.inclBytesOut, buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtBytes(r.icache,       buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtBytes(r.inclIcache,   buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtTime(Prof::cacheTime(Prof::CacheIFill, r.icache)     / divisor, buf, sizeof(buf)); numCell(r.icache     ? buf : "-");
+      ImGui::TableNextColumn(); fmtTime(Prof::cacheTime(Prof::CacheIFill, r.inclIcache) / divisor, buf, sizeof(buf)); numCell(r.inclIcache ? buf : "-");
+      ImGui::TableNextColumn(); fmtBytes(r.dcIn,      buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtBytes(r.inclDcIn,  buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtBytes(r.dcOut,     buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtBytes(r.inclDcOut, buf, sizeof(buf)); numCell(buf);
+      ImGui::TableNextColumn(); fmtTime(r.dcTime     / divisor, buf, sizeof(buf)); numCell(r.dcTime     ? buf : "-");
+      ImGui::TableNextColumn(); fmtTime(r.inclDcTime / divisor, buf, sizeof(buf)); numCell(r.inclDcTime ? buf : "-");
       ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", (f64)r.excl * invTotal); numCell(buf);
     }
     ImGui::EndTable();
@@ -287,6 +337,20 @@ auto DrawCpuProfiler() -> void {
         if(prof.symbolsLoaded) { snprintf(buf, sizeof(buf), "%.1f", (f64)spinExcl * invT); numCell(buf); }
         else                   { numCell("-"); }
 
+        // Time spent in cache transfers, summed over all functions. A subset of
+        // the rows above (it is part of each function's exclusive time).
+        u64 icacheT = Prof::cacheTime(Prof::CacheIFill, totalIcache);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.90f, 0.45f, 0.45f, 1), "ICache fill time");
+        ImGui::TableNextColumn(); fmtTime(icacheT / divisor, buf, sizeof(buf)); numCell(buf);
+        ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", (f64)icacheT * invT); numCell(buf);
+
+        u64 dcacheT = Prof::cacheTime(Prof::CacheDFill, totalDcIn) + Prof::cacheTime(Prof::CacheDWrite, totalDcOut);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextColored(ImVec4(0.43f, 0.80f, 0.49f, 1), "DCache transfer time");
+        ImGui::TableNextColumn(); fmtTime(dcacheT / divisor, buf, sizeof(buf)); numCell(buf);
+        ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", (f64)dcacheT * invT); numCell(buf);
+
         ImGui::TableNextRow();
         ImGui::TableNextColumn(); ImGui::TextDisabled(avgMode ? "Per-frame total" : "Profiled total");
         ImGui::TableNextColumn(); fmtTime(totalExcl / divisor, buf, sizeof(buf)); numCell(buf);
@@ -305,6 +369,24 @@ auto DrawCpuProfiler() -> void {
         ImGui::TableNextColumn(); ImGui::TextDisabled("RDRAM out");
         ImGui::TableNextColumn(); fmtBytes(totalBytesOut, buf, sizeof(buf)); numCell(buf);
         ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", (f64)totalBytesOut * invBus); numCell(buf);
+
+        // Instruction-cache fills are a subset of "RDRAM in"; % is that share.
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextDisabled("ICache fills");
+        ImGui::TableNextColumn(); fmtBytes(totalIcache, buf, sizeof(buf)); numCell(buf);
+        ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", totalBytesIn ? (f64)totalIcache * 100.0 / (f64)totalBytesIn : 0.0); numCell(buf);
+
+        // Data-cache fills are a subset of "RDRAM in", write-backs of "RDRAM out";
+        // % is the share of that direction.
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextDisabled("DCache in");
+        ImGui::TableNextColumn(); fmtBytes(totalDcIn, buf, sizeof(buf)); numCell(buf);
+        ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", totalBytesIn ? (f64)totalDcIn * 100.0 / (f64)totalBytesIn : 0.0); numCell(buf);
+
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextDisabled("DCache out");
+        ImGui::TableNextColumn(); fmtBytes(totalDcOut, buf, sizeof(buf)); numCell(buf);
+        ImGui::TableNextColumn(); snprintf(buf, sizeof(buf), "%.1f", totalBytesOut ? (f64)totalDcOut * 100.0 / (f64)totalBytesOut : 0.0); numCell(buf);
         ImGui::EndTable();
       }
       ImGui::EndTabItem();
