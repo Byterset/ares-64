@@ -260,6 +260,11 @@ DELETED=(
   tests/i8080
   tests/m68000
   tools
+  ares/a52
+  desktop-ui/emulator/atari-5200.cpp
+  mia/medium/atari-5200.cpp
+  mia/system/atari-5200.cpp
+  tests/armv6m
 )
 
 REMOTE="${1:-origin}"

@@ -347,6 +347,26 @@ static void DrawInputPanel() {
     }
   }
 
+  // How digital inputs (keys, d-pad buttons) bound to an analog axis move it.
+  // Read live by InputPair::value(), so changes apply immediately.
+  ImGui::SeparatorText("Digital to analog");
+  {
+    static constexpr const char* modeNames[] = {"Immediate", "Gradual (return to center)", "Gradual (hold position)"};
+    static constexpr const char* modeKeys[]  = {"Immediate", "GradualReturn", "GradualHold"};
+    int mode = settings.input.digitalToAnalog == "GradualReturn" ? 1
+             : settings.input.digitalToAnalog == "GradualHold"   ? 2 : 0;
+    if(ImGui::Combo("Mode", &mode, modeNames, IM_ARRAYSIZE(modeNames))) {
+      settings.input.digitalToAnalog = modeKeys[mode];
+    }
+    ImGui::BeginDisabled(mode == 0);
+    int ms = (int)settings.input.digitalToAnalogTime;
+    if(ImGui::SliderInt("Center-to-edge time", &ms, 100, 1000, "%d ms")) {
+      settings.input.digitalToAnalogTime = (u32)((ms + 25) / 50 * 50);  //50 ms steps, like the setting's range
+    }
+    ImGui::EndDisabled();
+  }
+  ImGui::SeparatorText("Bindings");
+
   // System/Port/Device selectors
   auto& ports = Emulator::enumeratePorts("Virtual Gamepads");
   if(inputSystemIdx == 0) {
