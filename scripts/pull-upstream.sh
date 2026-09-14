@@ -136,6 +136,130 @@ DELETED=(
   desktop-ui/emulator/zx-spectrum.cpp
   desktop-ui/emulator/zx-spectrum-128.cpp
   desktop-ui/presentation/presentation.cpp
+  ares/System
+  ares/ares/resource
+  ares/cmake
+  ares/component
+  cmake/finders/FindGTK.cmake
+  cmake/finders/FindSDL.cmake
+  cmake/finders/Findlibrashader.cmake
+  desktop-ui/game-browser/game-browser.cpp
+  desktop-ui/macos-fix-jit.cpp
+  desktop-ui/resource/resource.bml
+  mia/Database
+  "mia/Firmware/Game Boy"
+  "mia/Firmware/Game Boy Color"
+  mia/Firmware/MSX2
+  "mia/Firmware/Mega 32X"
+  "mia/Firmware/Mega Drive"
+  "mia/Firmware/Pocket Challenge V2"
+  "mia/Firmware/Super Famicom"
+  mia/Firmware/WonderSwan
+  "mia/Firmware/WonderSwan Color"
+  "mia/Firmware/ZX Spectrum"
+  "mia/Firmware/ZX Spectrum 128"
+  mia/medium/arcade.cpp
+  mia/medium/atari-2600.cpp
+  mia/medium/bs-memory.cpp
+  mia/medium/colecovision.cpp
+  mia/medium/famicom-disk-system.cpp
+  mia/medium/famicom.cpp
+  mia/medium/game-boy-advance.cpp
+  mia/medium/game-boy-color.cpp
+  mia/medium/game-boy.cpp
+  mia/medium/game-gear.cpp
+  mia/medium/mame.cpp
+  mia/medium/master-system.cpp
+  mia/medium/mega-32x.cpp
+  mia/medium/mega-cd.cpp
+  mia/medium/mega-drive.cpp
+  mia/medium/mega-ld.cpp
+  mia/medium/msx.cpp
+  mia/medium/msx2.cpp
+  mia/medium/myvision.cpp
+  mia/medium/neo-geo-crypt.hpp
+  mia/medium/neo-geo-pocket-color.cpp
+  mia/medium/neo-geo-pocket.cpp
+  mia/medium/neo-geo.cpp
+  mia/medium/pc-engine-cd.cpp
+  mia/medium/pc-engine-ld.cpp
+  mia/medium/pc-engine.cpp
+  mia/medium/playstation.cpp
+  mia/medium/pocket-challenge-v2.cpp
+  mia/medium/saturn.cpp
+  mia/medium/sc-3000.cpp
+  mia/medium/sg-1000.cpp
+  mia/medium/sufami-turbo.cpp
+  mia/medium/super-famicom.cpp
+  mia/medium/supergrafx.cpp
+  mia/medium/wonderswan-color.cpp
+  mia/medium/wonderswan.cpp
+  mia/medium/zx-spectrum.cpp
+  mia/resource/resource.bml
+  mia/system/arcade.cpp
+  mia/system/atari-2600.cpp
+  mia/system/colecovision.cpp
+  mia/system/famicom.cpp
+  mia/system/game-boy-advance.cpp
+  mia/system/game-boy-color.cpp
+  mia/system/game-boy.cpp
+  mia/system/game-gear.cpp
+  mia/system/master-system.cpp
+  mia/system/mega-32x.cpp
+  mia/system/mega-cd-32x.cpp
+  mia/system/mega-cd.cpp
+  mia/system/mega-drive.cpp
+  mia/system/mega-ld.cpp
+  mia/system/msx.cpp
+  mia/system/msx2.cpp
+  mia/system/myvision.cpp
+  mia/system/neo-geo-aes.cpp
+  mia/system/neo-geo-mvs.cpp
+  mia/system/neo-geo-pocket-color.cpp
+  mia/system/neo-geo-pocket.cpp
+  mia/system/pc-engine-ld.cpp
+  mia/system/pc-engine.cpp
+  mia/system/playstation.cpp
+  mia/system/pocket-challenge-v2.cpp
+  mia/system/saturn.cpp
+  mia/system/sc-3000.cpp
+  mia/system/sg-1000.cpp
+  mia/system/super-famicom.cpp
+  mia/system/supergrafx.cpp
+  mia/system/wonderswan-color.cpp
+  mia/system/wonderswan.cpp
+  mia/system/zx-spectrum-128.cpp
+  mia/system/zx-spectrum.cpp
+  nall/nall/any.hpp
+  nall/nall/cipher
+  nall/nall/database
+  nall/nall/decode/mmi.hpp
+  nall/nall/elliptic-curve
+  nall/nall/http
+  nall/nall/instruction-set.cpp
+  nall/nall/instruction-set.hpp
+  nall/nall/locale.hpp
+  nall/nall/map.hpp
+  nall/nall/pointer.hpp
+  nall/nall/serial.hpp
+  nall/nall/smtp.cpp
+  nall/nall/smtp.hpp
+  nall/nall/string/allocator/copy-on-write.hpp
+  nall/nall/string/allocator/small-string-optimization.hpp
+  nall/nall/string/allocator/vector.hpp
+  nall/nall/string/eval
+  nall/nall/string/markup/json.hpp
+  nall/nall/string/markup/xml.hpp
+  nall/nall/string/transform
+  nall/nall/variant.hpp
+  ruby/input/sdl.cpp
+  ruby/ruby.cpp
+  ruby/ruby.mm
+  ruby/video/opengl
+  tests/arm7tdmi
+  tests/i8080
+  tests/m68000
+  tools
 )
 
 REMOTE="${1:-origin}"
