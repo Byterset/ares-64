@@ -116,6 +116,13 @@ set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
 set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
 set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
+
+# Avoids path-issues like e.g.:
+# D:/a/ares-64/ares-64/build/thirdparty/SDL/CMakeFiles/SDL3-static.dir/cmake_pch.hxx:5:10: fatal error: '/d/a/ares-64/ares-64/thirdparty/SDL/src/SDL_internal.h' file not found
+#    5 | #include "/d/a/ares-64/ares-64/thirdparty/SDL/src/SDL_internal.h"
+if(CMAKE_HOST_SYSTEM_NAME MATCHES "MSYS|CYGWIN")
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+endif()
 add_subdirectory(SDL)
 
 add_library(
