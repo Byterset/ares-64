@@ -39,9 +39,21 @@ endif()
 
 add_compile_definitions(_WIN32_WINNT=0x0A00) #global
 
+# Debug-info format for MSYS2/MinGW builds. Clang defaults to CodeView (PDBs for
+# WinDbg / Visual Studio); GCC defaults to DWARF, since most GCC versions have no
+# -gcodeview and the ones that do reject DWARF flags added by subprojects next to
+# it (SDL adds -gdwarf-4 on MinGW). The default has to be chosen here, before the
+# option is declared: once declared it is always "defined", so a later
+# `if(NOT DEFINED ...)` can never fall back per compiler.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  set(_ares_mingw_dwarf_default ON)
+else()
+  set(_ares_mingw_dwarf_default OFF)
+endif()
 option(
   ARES_MINGW_USE_DWARF_SYMBOLS
   "Generate DWARF debug symbols (instead of CodeView) for use with gdb or lldb. Applies to MSYS2/MinGW environments."
+  ${_ares_mingw_dwarf_default}
 )
 
 set(
@@ -104,10 +116,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     # msys2/mingw-specific invocations to make clang emit debug symbols.
     # Default: use CodeView (-gcodeview) for better WinDbg/Visual Studio integration.
     # Set ARES_MINGW_USE_DWARF_SYMBOLS=ON to use DWARF instead (e.g. for gdb/lldb workflows).
-    if(NOT DEFINED ARES_MINGW_USE_DWARF_SYMBOLS)
-      set(ARES_MINGW_USE_DWARF_SYMBOLS OFF)
-    endif()
-
     if(NOT ARES_MINGW_USE_DWARF_SYMBOLS AND ARES_COMPILER_SUPPORTS_GCODEVIEW)
       set(_ares_mingw_clang_debug_compile_options -gcodeview)
     elseif(NOT ARES_COMPILER_SUPPORTS_GCODEVIEW AND NOT ARES_MINGW_USE_DWARF_SYMBOLS)
@@ -152,11 +160,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     add_link_options(/WX)
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  # msys2/mingw GCC — default to DWARF since most GCC versions don't support -gcodeview.
-  if(NOT DEFINED ARES_MINGW_USE_DWARF_SYMBOLS)
-    set(ARES_MINGW_USE_DWARF_SYMBOLS ON)
-  endif()
-
+  # msys2/mingw GCC — DWARF by default (see the option's default above).
   if(NOT ARES_MINGW_USE_DWARF_SYMBOLS)
     # User explicitly disabled DWARF; try CodeView.
     if(ARES_COMPILER_SUPPORTS_GCODEVIEW)

@@ -123,6 +123,13 @@ set(SDL_X11_XTEST OFF CACHE BOOL "" FORCE)
 if(CMAKE_HOST_SYSTEM_NAME MATCHES "MSYS|CYGWIN")
   set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
 endif()
+# On MinGW SDL adds -gdwarf-4 to its own targets.
+# GCC rejects that next to -gcodeview ("debug format 'dwarf-2' conflicts with prior selection")
+get_directory_property(_ares_thirdparty_copts COMPILE_OPTIONS)
+if(_ares_thirdparty_copts MATCHES "gcodeview")
+  set(HAVE_GDWARF_4 OFF CACHE BOOL "SDL: not added, ares emits CodeView debug info" FORCE)
+endif()
+unset(_ares_thirdparty_copts)
 add_subdirectory(SDL)
 
 add_library(
