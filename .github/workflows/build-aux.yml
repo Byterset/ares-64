@@ -15,7 +15,9 @@ jobs:
           os: windows-latest
           shell: 'msys2 {0}'
           msystem: mingw64
-          install: make git cmake ccache ninja mingw-w64-x86_64-toolchain
+          # toolchain-native cmake/ninja/ccache (see build.yml): the MSYS ones emit
+          # POSIX paths the native compiler cannot use in SDL's PCH / -idirafter
+          install: mingw-w64-x86_64-make git mingw-w64-x86_64-cmake mingw-w64-x86_64-ccache mingw-w64-x86_64-ninja mingw-w64-x86_64-toolchain
           target-cmake-preset: windows-ci-mingw-native
         - name: windows-clang-cl-x64
           os: windows-latest

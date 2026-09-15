@@ -27,7 +27,11 @@ jobs:
           compiler: clang++
           shell: 'msys2 {0}'
           msystem: clang64
-          install: make git cmake ccache ninja mingw-w64-clang-x86_64-clang
+          # the toolchain's own cmake/ninja/ccache, not the MSYS (POSIX) ones: a POSIX
+          # cmake driving the native compiler emits /d/... paths that only survive
+          # where MSYS converts arguments, and SDL's generated PCH and -idirafter flags
+          # are not among those
+          install: mingw-w64-clang-x86_64-make git mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ccache mingw-w64-clang-x86_64-ninja mingw-w64-clang-x86_64-clang
           target-cmake-preset: windows-ci-mingw-native
         - name: windows-clang-cl-arm64
           os: windows-latest
