@@ -5,7 +5,11 @@ auto CPU::DataCache::Line::hit(u32 paddr) const -> bool {
 
 auto CPU::DataCache::Line::fill(u32 paddr) -> void {
   const u32 tag = paddr & ~0x0000'0fffu;
-  cpu.profileCacheEvent(Profiler::CacheDFill, tag | index);
+  profileEvict();  //the content being replaced
+  eventId = cpu.profileCacheFill(Profiler::CacheDFill, tag | index);
+#if ARES_DEBUG_TOOLS
+  touched = cpu.profiler.takePendingTouch(tag | index);
+#endif
   cpu.step(40 * 2);
   dirty  = 0;
   tagKey = tag;
@@ -15,9 +19,20 @@ auto CPU::DataCache::Line::fill(u32 paddr) -> void {
 
 auto CPU::DataCache::Line::writeBack() -> void {
   const u32 tag = tagKey & ~0x0000'0fffu;
-  cpu.profileCacheEvent(Profiler::CacheDWrite, tag | index);
+  //a write-back is complete in itself: close it at once with the dirty bytes
+  u64 id = cpu.profileCacheFill(Profiler::CacheDWrite, tag | index);
+  cpu.profileCacheContent(id, words, 4);
+  cpu.profileCacheEvict(id, 0, dirty);
   cpu.step(40 * 2);
   cpu.busWriteBurst<DCache>(tag | index, words);
+}
+
+auto CPU::DataCache::Line::profileEvict() -> void {
+  cpu.profileCacheContent(eventId, words, 4);  //the data as it leaves the cache
+  cpu.profileCacheEvict(eventId, touched, dirty | writtenBack);
+  eventId = 0;
+  touched = 0;
+  writtenBack = 0;
 }
 
 auto CPU::DataCache::line(u64 vaddr) -> Line& {

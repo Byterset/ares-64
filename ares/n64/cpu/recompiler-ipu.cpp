@@ -307,7 +307,10 @@ auto CPU::Recompiler::jitMemoryOpcode(u32 instruction, u32 size, u32 mode,
       mov32(mem(reg(3), DcacheLineWordsOff + 4), mem(Rt32));
     }
 
-    if(system.homebrewMode) {
+    //per-byte dirty tracking: homebrew mode wants it for its own checks, and the
+    //profiler needs it for cache-line utilisation (its prologue hook forces a
+    //recompile when toggled, so this decision is refreshed with it)
+    if(system.homebrewMode || callInstructionPrologue) {
       add64(reg(4), mem(Rs), imm(i16));
       and32(reg(4), reg(4), imm(0x0f));
       if(reverseEndianXor) {

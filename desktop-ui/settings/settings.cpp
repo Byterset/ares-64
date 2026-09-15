@@ -91,6 +91,10 @@ auto Settings::process(bool load) -> void {
   bind(boolean, "General/ShowRspViewer", general.showRspViewer);
   bind(boolean, "General/ShowCpuProfiler", general.showCpuProfiler);
   bind(boolean, "General/ShowFlameChart", general.showFlameChart);
+  bind(boolean, "FlameChart/WarnICache", general.flameWarnICache);
+  bind(boolean, "FlameChart/WarnDCache", general.flameWarnDCache);
+  bind(natural, "FlameChart/WarnThreshold", general.flameWarnThreshold);
+  general.flameWarnThreshold = max(1u, min(512u, general.flameWarnThreshold));
   bind(boolean, "General/ShowTmemViewer", general.showTmemViewer);
   bind(boolean, "General/ShowMemoryViewer", general.showMemoryViewer);
   bind(boolean, "General/ShowRegisterViewer", general.showRegisterViewer);

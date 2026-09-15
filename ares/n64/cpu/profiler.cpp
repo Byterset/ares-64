@@ -124,10 +124,13 @@ static auto baseOf(const string& s) -> string {
 auto CPU::Profiler::now() -> u64 {
   // Master-clock timebase (187.5 MHz). synchronize() folds cpu.clock into
   // profile.cpuCycles as (clocks >> 1), i.e. CPU cycles, so scale that back up
-  // by 2 and add the still-pending master clocks. This may step backwards by at
-  // most 1 master clock at a sync boundary (the truncated low bit); callers
-  // guard their subtractions against that.
-  return (u64)(cpu.profile.cpuCycles * 2 + cpu.clock);
+  // by 2 and add the still-pending master clocks. A COUNT read (flushCount)
+  // folds the pending clocks early without resetting cpu.clock, tracking how
+  // much it took in countClock: subtract that or those clocks would be counted
+  // twice until the next synchronize, which made timestamps jump ahead and then
+  // fall back. This may still step backwards by at most 1 master clock at a
+  // sync boundary (the truncated low bit); callers guard their subtractions.
+  return (u64)(cpu.profile.cpuCycles * 2 + cpu.clock - cpu.countClock);
 }
 
 auto CPU::Profiler::loadSymbols(const string& romPath) -> bool {
@@ -267,7 +270,7 @@ auto CPU::Profiler::onBusAccess(bool toRDRAM, u64 bytes) -> void {
 // also counted there as RDRAM in/out bytes; this keeps the cache share separate).
 // Must be called before the transfer's step(), so `time` is its start. Also
 // appended to the event ring for the flame chart.
-auto CPU::Profiler::onCacheEvent(u8 kind, u32 paddr) -> void {
+auto CPU::Profiler::onCacheFill(u8 kind, u32 paddr) -> u64 {
   u32 funcAddr = 0;
   bool isException = false;
   if(!callStack.empty()) {
@@ -276,10 +279,108 @@ auto CPU::Profiler::onCacheEvent(u8 kind, u32 paddr) -> void {
     funcAddr = top.funcAddr;
     isException = top.isException;
   }
-  if(recordTimeline.load(std::memory_order_relaxed) && cacheEvents.size() == maxCacheEvents) {
-    u64 w = cacheEventWrite.load(std::memory_order_relaxed);
-    cacheEvents[w % maxCacheEvents] = {now(), paddr, funcAddr, kind, isException};
-    cacheEventWrite.store(w + 1, std::memory_order_release);
+  if(!recordTimeline.load(std::memory_order_relaxed) || cacheEvents.size() != maxCacheEvents) return 0;
+  u64 w = cacheEventWrite.load(std::memory_order_relaxed);
+  auto& e = cacheEvents[w % maxCacheEvents];
+  e = {};
+  e.time = now();
+  e.paddr = paddr;
+  e.funcAddr = funcAddr;
+  e.causePc = (u32)cpu.ipu.pc;
+  e.kind = kind;
+  e.isException = isException;
+  //reuse distance: fills into this cache since this line was last evicted
+  if(kind != CacheDWrite) {
+    u32 c = kind == CacheIFill ? 0 : 1;
+    u64 seq = ++fillSeq[c];
+    u32 index = paddr >> (c == 0 ? 5 : 4);
+    if(index < lineHistory[c].size()) {
+      auto& h = lineHistory[c][index];
+      if(h.fillSeq) {
+        e.reuseFills = (u32)std::min<u64>(seq - h.fillSeq, 0xffff'ffff);
+        e.reuseTime = e.time > h.time ? e.time - h.time : 0;
+        e.prevEvictorPc = h.evictorPc;
+        e.prevEvictorFuncAddr = h.evictorFuncAddr;
+      }
+    }
+  }
+  cacheEventWrite.store(w + 1, std::memory_order_release);
+  return w + 1;  //id 0 is "no event"
+}
+
+auto CPU::Profiler::onCacheContent(u64 eventId, const u32* words, u32 count) -> void {
+  if(!eventId) return;
+  u64 w = cacheEventWrite.load(std::memory_order_relaxed);
+  if(w - (eventId - 1) > maxCacheEvents || cacheEvents.size() != maxCacheEvents) return;
+  auto& e = cacheEvents[(eventId - 1) % maxCacheEvents];
+  for(u32 i = 0; i < count && i < 8; i++) e.words[i] = words[i];
+  e.wordCount = count;
+}
+
+// The line a fill event describes has been replaced (or invalidated): record
+// how much of it was used while it was resident, and who pushed it out. The
+// event may already have been overwritten in the ring; then it is simply lost.
+auto CPU::Profiler::onCacheEvict(u64 eventId, u16 readMask, u16 writeMask) -> void {
+  if(!eventId) return;
+  u64 w = cacheEventWrite.load(std::memory_order_relaxed);
+  if(w - (eventId - 1) > maxCacheEvents || cacheEvents.size() != maxCacheEvents) return;
+  auto& e = cacheEvents[(eventId - 1) % maxCacheEvents];
+  e.readMask = readMask;
+  e.writeMask = writeMask;
+  e.evictTime = now();
+  e.evictorPc = (u32)cpu.ipu.pc;
+  e.evictorFuncAddr = callStack.empty() ? 0 : callStack.back().funcAddr;
+  //remember the eviction for the reuse distance of the line's next fill
+  if(e.kind != CacheDWrite) {
+    u32 c = e.kind == CacheIFill ? 0 : 1;
+    u32 index = e.paddr >> (c == 0 ? 5 : 4);
+    if(index < lineHistory[c].size()) {
+      lineHistory[c][index] = {fillSeq[c], e.evictTime, e.evictorPc, e.evictorFuncAddr};
+    }
+  }
+}
+
+// Cache-line utilisation. Every instruction passes through here while profiling,
+// so mark the icache word being executed and, for loads, the bytes about to be
+// read from their dcache line. Only KSEG0 (the cached, directly mapped segment
+// all homebrew runs in) is followed; TLB-mapped accesses are not attributed.
+// The register values seen here are the instruction's inputs, so the effective
+// address can be computed before it executes. Stores need nothing: the line's
+// dirty mask already records the bytes written.
+auto CPU::Profiler::onCacheTouch(u64 address, u32 instruction) -> void {
+  u32 pc32 = (u32)address;
+  pendingTouchAddr = ~0u;
+  pendingExecAddr = ~0u;
+  if((pc32 >> 29) == 4) {  //0x80000000-0x9fffffff
+    u32 paddr = pc32 & 0x1fff'ffff;
+    auto& line = cpu.icache.line(pc32);
+    u8 word = 1u << (paddr >> 2 & 7);
+    if(line.hit(paddr)) {
+      line.executed |= word;
+    } else {
+      pendingExecAddr = paddr & ~0x1fu;
+      pendingExecMask = word;
+    }
+  }
+  //bytes read by each load opcode (0 = not a load; LWL/LWR count as their word)
+  static constexpr u8 loadSize[64] = {
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+    0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0,
+    1,2,4,4, 1,2,4,4, 0,0,0,0, 0,0,0,0,  //LB LH LWL LW LBU LHU LWR LWU
+    4,4,0,0, 8,8,0,8, 0,0,0,0, 0,0,0,0,  //LL LWC1 . . LLD LDC1 . LD
+  };
+  u32 size = loadSize[instruction >> 26];
+  if(!size) return;
+  u32 vaddr = (u32)(cpu.ipu.r[instruction >> 21 & 31].u64 + (s16)instruction);
+  if((vaddr >> 29) != 4) return;
+  u32 paddr = (vaddr & 0x1fff'ffff) & ~(size - 1);
+  u16 mask = ((1u << size) - 1) << (paddr & 0xf);
+  auto& line = cpu.dcache.line(vaddr);
+  if(line.hit(paddr)) {
+    line.touched |= mask;
+  } else {
+    pendingTouchAddr = paddr & ~0xfu;
+    pendingTouchMask = mask;
   }
 }
 
@@ -456,6 +557,10 @@ auto CPU::Profiler::setEnabled(bool value) -> void {
   syncOpenFrames();
   if(value && timeline.size() != maxSpans) timeline.resize(maxSpans);
   if(value && cacheEvents.size() != maxCacheEvents) cacheEvents.resize(maxCacheEvents);
+  if(value && lineHistory[0].empty()) {
+    lineHistory[0].resize(0x80'0000 >> 5);  //8 MB RDRAM of 32-byte icache lines
+    lineHistory[1].resize(0x80'0000 >> 4);  //... and 16-byte dcache lines
+  }
   cpu.updatePrologueHook();
 }
 
@@ -469,6 +574,8 @@ auto CPU::Profiler::power() -> void {
   clearStats();  //stats + call stacks + the span ring
   viMarkWrite.store(0, std::memory_order_release);
   cacheEventWrite.store(0, std::memory_order_release);
+  for(auto& h : lineHistory) std::fill(h.begin(), h.end(), LineHistory{});
+  fillSeq[0] = fillSeq[1] = 0;
 }
 
 auto CPU::Profiler::clearStats() -> void {
@@ -483,10 +590,26 @@ auto CPU::Profiler::clearStats() -> void {
   timelineWrite.store(0, std::memory_order_release);
 }
 
-auto CPU::profileCacheEvent(u8 kind, u32 address) -> void {
+auto CPU::profileCacheFill(u8 kind, u32 address) -> u64 {
 #if ARES_DEBUG_TOOLS
-  if(!profiler.enabled.load(std::memory_order_relaxed)) return;
-  profiler.onCacheEvent(kind, address);
+  if(!profiler.enabled.load(std::memory_order_relaxed)) return 0;
+  return profiler.onCacheFill(kind, address);
+#else
+  return 0;
+#endif
+}
+
+auto CPU::profileCacheContent(u64 eventId, const u32* words, u32 count) -> void {
+#if ARES_DEBUG_TOOLS
+  if(!eventId || !profiler.enabled.load(std::memory_order_relaxed)) return;
+  profiler.onCacheContent(eventId, words, count);
+#endif
+}
+
+auto CPU::profileCacheEvict(u64 eventId, u16 readMask, u16 writeMask) -> void {
+#if ARES_DEBUG_TOOLS
+  if(!eventId || !profiler.enabled.load(std::memory_order_relaxed)) return;
+  profiler.onCacheEvict(eventId, readMask, writeMask);
 #endif
 }
 

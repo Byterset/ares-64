@@ -82,6 +82,11 @@ struct Settings : Markup::Node {
     bool showRspViewer = false;
     bool showCpuProfiler = false;
     bool showFlameChart = false;
+    //flame chart: cache conflict-miss warnings per cache, and the reuse distance
+    //(in fills) below which a conflict gets a warning triangle
+    bool flameWarnICache = true;
+    bool flameWarnDCache = false;
+    u32  flameWarnThreshold = 16;
     bool showTmemViewer = false;
     bool showMemoryViewer = false;
     bool showRegisterViewer = false;

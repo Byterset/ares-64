@@ -120,6 +120,7 @@ auto Program::load(string location) -> bool {
     if(!cap.embeddedRspqJson) cap.embeddedRspqJson = ares::ui::embeddedRspqJson;
     if(!cap.embeddedF3dJson)  cap.embeddedF3dJson  = ares::ui::embeddedF3dJson;
     cap.autoDetect(location);
+    ares::ui::sourceLines.setElf(cap.elfPath);  //addr2line-backed source lookup for the tools
 
     if(ares::ui::logDump.active()) {
       ares::Nintendo64::rsp.capture.enabled.store(true, std::memory_order_release);

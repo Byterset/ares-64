@@ -212,11 +212,18 @@ struct CPU : Thread {
 
       auto fill(u32 paddr, CPU& cpu) -> void {
         const u32 tag = paddr & ~0x0000'0fffu;
-        cpu.profileCacheEvent(Profiler::CacheIFill, tag | index);
+        profileEvict(cpu);  //the content being replaced
+        eventId = cpu.profileCacheFill(Profiler::CacheIFill, tag | index);
+#if ARES_DEBUG_TOOLS
+        //the instruction whose fetch caused this fill was already announced
+        //to the profiler (the JIT runs the prologue before its line check)
+        executed = cpu.profiler.takePendingExec(tag | index);
+#endif
         cpu.step(48 * 2);
         tagKey = tag;
         setValid(true);
         cpu.busReadBurst<ICache>(tag | index, words);
+        cpu.profileCacheContent(eventId, words, 8);  //what was fetched, for the flame chart
       }
 
       auto writeBack(CPU& cpu) -> void {
@@ -227,9 +234,20 @@ struct CPU : Thread {
 
       auto read(u32 paddr) const -> u32 { return words[paddr >> 2 & 7]; }
 
+      //profiler: close the line's fill event with what was executed out of it
+      auto profileEvict(CPU& cpu) -> void {
+        cpu.profileCacheEvict(eventId, executed, 0);
+        eventId = 0;
+        executed = 0;
+      }
+
       u32  tagKey;    // valid bit (bit 0) + tag
       u16  index;
       u32  words[8];
+      //profiling only (not serialized): words executed since the fill, and the
+      //fill's slot in the profiler's cache-event ring (0 = none)
+      u8   executed = 0;
+      u64  eventId = 0;
     } lines[512];
   } icache{*this};
 
@@ -256,6 +274,7 @@ struct CPU : Thread {
       auto hit(u32 paddr) const -> bool;
       auto fill(u32 paddr) -> void;
       auto writeBack() -> void;
+      auto profileEvict() -> void;  //close the fill event with the bytes read/written
       template<u32 Size> auto read(u32 paddr) const -> u64;
       template<u32 Size> auto write(u32 paddr, u64 data) -> void;
 
@@ -264,6 +283,11 @@ struct CPU : Thread {
       u16  index;
       u64  fillPc;
       u64  dirtyPc;
+      //profiling only (not serialized): bytes read since the fill (writes are in
+      //`dirty`), and the fill's slot in the profiler's cache-event ring (0 = none)
+      u16  touched = 0;
+      u16  writtenBack = 0;  //dirty bytes already flushed by a `cache hit write back`
+      u64  eventId = 0;
       union {
         u8  bytes[16];
         u16 halfs[8];
@@ -361,7 +385,11 @@ struct CPU : Thread {
     line.fill(paddr, *this);
   }
   auto profileBusAccess(bool toRDRAM, u32 address, u64 bytes) -> void;  //memory.cpp
-  auto profileCacheEvent(u8 kind, u32 address) -> void;  //profiler.cpp: one cache line transfer (Profiler::CacheKind)
+  //profiler.cpp: cache line transfers (Profiler::CacheKind). A fill returns the
+  //event's id so the line can close it on eviction with its utilisation masks.
+  auto profileCacheFill(u8 kind, u32 address) -> u64;
+  auto profileCacheContent(u64 eventId, const u32* words, u32 count) -> void;
+  auto profileCacheEvict(u64 eventId, u16 readMask, u16 writeMask) -> void;
   template<u32 Size> auto busWrite(u32 address, u64 data) -> void;
   template<u32 Size> auto busRead(u32 address) -> u64;
   template<u32 Size> auto busWriteBurst(u32 address, u32 *data) -> bool;
@@ -1461,9 +1489,45 @@ struct CPU : Thread {
       u64 time = 0;      //absolute now() tick at which the transfer started
       u32 paddr = 0;     //physical address of the cache line
       u32 funcAddr = 0;  //function on top of the call stack (0 = none tracked)
+      u32 causePc = 0;   //PC of the instruction that triggered the transfer
       u8  kind = CacheIFill;
       bool isException = false;
+      //Line utilisation, filled in when the line is evicted (a write-back is
+      //complete immediately). Until then evictTime is 0 ("still cached").
+      //Bit n = byte n of a dcache line; for an icache line the low 8 bits are
+      //its words. readMask holds bytes read / words executed, writeMask bytes
+      //written (the line's dirty mask).
+      u16 readMask = 0;
+      u16 writeMask = 0;
+      u64 evictTime = 0;
+      u32 evictorPc = 0;       //instruction whose access replaced the line
+      u32 evictorFuncAddr = 0; //function it ran in
+      //The line's content: the 8 words an icache fill fetched (its instructions),
+      //or the 4 words a dcache line held when it was evicted / written back.
+      u32 words[8] = {};
+      u8  wordCount = 0;
+      //Reuse distance of a fill: how many fills into this cache happened since
+      //the same line was last evicted (0 = never evicted since profiling
+      //started, i.e. a first touch). Fewer than the cache's line count means a
+      //better-mapped cache of the same size would still have held it — a
+      //conflict miss, which layout can fix; more means capacity.
+      u32 reuseFills = 0;
+      u64 reuseTime = 0;         //ticks since that eviction
+      u32 prevEvictorPc = 0;     //what pushed the line out back then
+      u32 prevEvictorFuncAddr = 0;
     };
+    static constexpr u32 cacheLines = 512;  //both caches: reuse distance below this = conflict
+    //Per RDRAM line, when it was last evicted from its cache and by whom, for
+    //the reuse distance of the next fill. Indexed by paddr / line size; sized
+    //for the 8 MB RDRAM when the profiler is enabled (profiling only).
+    struct LineHistory {
+      u64 fillSeq = 0;   //fill counter value at eviction (0 = never)
+      u64 time = 0;
+      u32 evictorPc = 0;
+      u32 evictorFuncAddr = 0;
+    };
+    std::vector<LineHistory> lineHistory[2];  //[0] icache (32 B lines), [1] dcache (16 B lines)
+    u64 fillSeq[2] = {};                       //fills into each cache so far
     static constexpr u32 maxCacheEvents = 1u << 18;
     std::vector<CacheEvent> cacheEvents;  //ring buffer, sized to maxCacheEvents when enabled
     std::atomic<u64> cacheEventWrite{0};
@@ -1482,7 +1546,30 @@ struct CPU : Thread {
     //memory-bus access committed to RDRAM, attributed to the current frame.
     //toRDRAM=true is outgoing (CPU -> RDRAM), false is incoming (RDRAM -> CPU).
     auto onBusAccess(bool toRDRAM, u64 bytes) -> void;
-    auto onCacheEvent(u8 kind, u32 paddr) -> void;  //cache line transfer: attribute + record event
+    auto onCacheTouch(u64 address, u32 instruction) -> void;  //per instruction: mark cache line usage
+    auto onCacheFill(u8 kind, u32 paddr) -> u64;  //cache line transfer: attribute + record; returns event id
+    auto onCacheContent(u64 eventId, const u32* words, u32 count) -> void;  //attach the line's words
+    auto onCacheEvict(u64 eventId, u16 readMask, u16 writeMask) -> void;  //close the event
+    //Load whose line was not resident at the prologue: its bytes are applied to
+    //the line once the fill has brought it in (see onInstruction / Line::fill).
+    //Keyed by the line's physical address (a Line's `index` alone does not
+    //identify it: it only holds the offset within the tag's 4 KB region).
+    u32 pendingTouchAddr = ~0u;
+    u16 pendingTouchMask = 0;
+    auto takePendingTouch(u32 lineAddr) -> u16 {
+      if(lineAddr != pendingTouchAddr) return 0;
+      pendingTouchAddr = ~0u;
+      return pendingTouchMask;
+    }
+    //same for the icache: the word of an instruction whose line was not resident
+    //at the prologue (the fill follows right after)
+    u32 pendingExecAddr = ~0u;
+    u8  pendingExecMask = 0;
+    auto takePendingExec(u32 lineAddr) -> u8 {
+      if(lineAddr != pendingExecAddr) return 0;
+      pendingExecAddr = ~0u;
+      return pendingExecMask;
+    }
     auto onException(u32 code) -> void;  //exception/interrupt entry: push handler frame
     auto onEret() -> void;               //exception return: pop handler frame
     auto popFrame() -> bool;             //record+propagate top frame; returns isException

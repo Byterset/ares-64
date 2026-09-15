@@ -13,6 +13,9 @@ add_executable(
   ui/log-dump.cpp
   ui/cpu-profiler.cpp
   ui/flame-chart.cpp
+  ui/flame-chart-data.cpp
+  ui/flame-chart-cache.cpp
+  ui/source-lines.cpp
   ui/framebuffer-viewer.cpp
   ui/tmem-viewer.cpp
   ui/memory-viewer.cpp
@@ -48,6 +51,9 @@ set_source_files_properties(
   ui/log-dump.cpp
   ui/cpu-profiler.cpp
   ui/flame-chart.cpp
+  ui/flame-chart-data.cpp
+  ui/flame-chart-cache.cpp
+  ui/source-lines.cpp
   ui/framebuffer-viewer.cpp
   ui/tmem-viewer.cpp
   ui/memory-viewer.cpp

@@ -10,6 +10,7 @@
 #include <imgui.h>
 #include <nall/stdint.hpp>
 #include "assign.hpp"
+#include "source-lines.hpp"
 
 namespace ares::ui {
 

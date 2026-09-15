@@ -128,6 +128,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
 
   case 0x00: {  //icache index invalidate
     auto& line = icache.line(access.vaddr);
+    line.profileEvict(cpu);
     line.tagKey = access.paddr & ~0xfff;
     line.setValid(false);
     break;
@@ -150,7 +151,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
 
   case 0x10: {  //icache hit invalidate
     auto& line = icache.line(access.vaddr);
-    if(line.hit(access.paddr)) line.setValid(false);
+    if(line.hit(access.paddr)) line.profileEvict(cpu), line.setValid(false);
     break;
   }
 
@@ -178,6 +179,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
       profile.dcacheWritebacks++;
     }
     if(valid) line.tagKey = access.paddr & ~0xfff;
+    line.profileEvict();
     line.setValid(false);
     break;
   }
@@ -204,6 +206,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
         line.writeBack();
         profile.dcacheWritebacks++;
       }
+      line.profileEvict();
       line.dirty = 0;
     }
     line.tagKey = access.paddr & ~0xfff;
@@ -213,7 +216,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
 
   case 0x11: {  //dcache hit invalidate
     auto& line = dcache.line(access.vaddr);
-    if(line.hit(access.paddr)) line.setValid(false);
+    if(line.hit(access.paddr)) line.profileEvict(), line.setValid(false);
     break;
   }
 
@@ -224,6 +227,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
         line.writeBack();
         profile.dcacheWritebacks++;
       }
+      line.profileEvict();
       line.setValid(false);
     }
     break;
@@ -234,6 +238,7 @@ auto CPU::CACHE(u8 operation, cr64& rs, s16 imm) -> void {
     if(line.hit(access.paddr)) {
       if(line.dirty) {
         line.writeBack();
+        line.writtenBack |= line.dirty;
         line.dirty = 0;
         profile.dcacheWritebacks++;
       }

@@ -202,8 +202,10 @@ auto CPU::instruction() -> bool {
 auto CPU::instructionPrologue(u64 address, u32 instruction) -> void {
 #if ARES_DEBUG_TOOLS
   debugger.instruction(address, instruction);
-  if(unlikely(profiler.enabled.load(std::memory_order_relaxed)))
+  if(unlikely(profiler.enabled.load(std::memory_order_relaxed))) {
     profiler.onInstruction(address, instruction);
+    profiler.onCacheTouch(address, instruction);
+  }
 #endif
 }
 

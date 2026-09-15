@@ -1,60 +1,17 @@
-#include "ui.hpp"
+// Flame chart window: the toolbar, the view (pan/zoom/scroll, measurement
+// marker), the time axis, the CPU call-stack lane and the RSP/RDP lanes with
+// their tooltips. Data collection lives in flame-chart-data.cpp, the Cache
+// lane in flame-chart-cache.cpp; see flame-chart.hpp.
+#include "flame-chart.hpp"
 
 #include "../desktop-ui.hpp"
-#include <n64/n64.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <vector>
 
 namespace ares::ui {
 
 bool showFlameChart = false;
-
-// Master clock: 187.5 ticks per microsecond (matches the CPU profiler / RSP viewer).
-static constexpr f64 ticksPerMicrosecond = 187.5;
-
-using Span = ares::Nintendo64::CPU::Profiler::Span;
-
-// A CPU span placed on the window's timeline. Mirrors Profiler::Span (which only
-// ever describes a *completed* call) plus an `ongoing` flag for calls that are
-// still on the stack: those are synthesised from Profiler::openFrames and run to
-// the right edge, so a long function that hasn't returned yet draws as a bar
-// instead of a gap.
-struct CpuSpan {
-  u64 start = 0, end = 0;
-  u32 funcAddr = 0;
-  u16 depth = 0;
-  bool isException = false;
-  bool ongoing = false;
-};
-
-// A flattened RSP command span, window-relative (tick 0 = window start).
-struct RspSpan {
-  u64 start = 0, end = 0;
-  u16 overlayId = 0;
-  u8  commandId = 0;
-  bool overhead = false;
-  u8  overheadType = 0;
-};
-
-// A flattened RDP "DP flush" block, window-relative. The RDP has no per-command
-// wall-clock timing, so each flush is one block anchored at its real submit time;
-// its width is synthetic (command count * a nominal per-command tick budget).
-struct RdpSpan {
-  u64 start = 0, end = 0;
-  u32 count = 0;
-};
-
-// Stable per-function color from its address (golden-ratio hue hash).
-static auto spanColor(u32 addr, bool isException) -> ImU32 {
-  if(isException) return IM_COL32(120, 120, 130, 255);  //handlers: muted gray-blue
-  u32 h = addr * 2654435761u;                            //Knuth multiplicative hash
-  f32 hue = (h >> 8) / (f32)0x00ffffff;
-  f32 r, g, b;
-  ImGui::ColorConvertHSVtoRGB(hue, 0.55f, 0.85f, r, g, b);
-  return IM_COL32((int)(r * 255), (int)(g * 255), (int)(b * 255), 255);
-}
 
 // RSP overlay palette (mirrors the RSP viewer's overlayColor).
 static auto rspOverlayColor(u8 overlayId) -> ImU32 {
@@ -74,29 +31,6 @@ static auto rspLabel(u8 overheadType, bool overhead, u16 overlayId, u8 commandId
   auto& name = rcap.commandNameMap[overlayId & 15][commandId];
   if(name) return name;
   return string{"ovl", hex(overlayId, 1L), ":", hex(commandId, 2L)};
-}
-
-static auto fmtTime(f64 ticks, char* buf, size_t n) -> void {
-  f64 us = ticks / ticksPerMicrosecond;
-  if(us < 1000.0) snprintf(buf, n, "%.2f us", us);
-  else            snprintf(buf, n, "%.3f ms", us / 1000.0);
-}
-
-// Like fmtTime, but also reports the raw cycle count
-static auto fmtTimeCyc(f64 ticks, char* buf, size_t n) -> void {
-  f64 us = ticks / ticksPerMicrosecond;
-  long long cyc = (long long)(ticks + 0.5);
-  if(us < 1000.0) snprintf(buf, n, "%.2f us (%lld cyc)", us, cyc);
-  else            snprintf(buf, n, "%.3f ms (%lld cyc)", us / 1000.0, cyc);
-}
-
-// Signed elapsed time + cycle count (for the measurement marker -> cursor readout).
-static auto fmtDelta(f64 ticks, char* buf, size_t n) -> void {
-  char sign = ticks < 0 ? '-' : '+';
-  f64 us = std::abs(ticks) / ticksPerMicrosecond;
-  long long cyc = (long long)(std::abs(ticks) + 0.5);
-  if(us < 1000.0) snprintf(buf, n, "%c%.2f us (%lld cyc)", sign, us, cyc);
-  else            snprintf(buf, n, "%c%.3f ms (%lld cyc)", sign, us / 1000.0, cyc);
 }
 
 auto DrawFlameChart() -> void {
@@ -139,18 +73,6 @@ auto DrawFlameChart() -> void {
     autoActive = true;
   }
 
-  static std::vector<CpuSpan> spans;
-  static std::vector<RspSpan> rspSpans;
-  static std::vector<RdpSpan> rdpSpans;
-  static std::vector<std::pair<u64, u64>> haltSpans;  //window-relative RSP halt intervals
-  static std::vector<u64> viMarks;  //window-relative VI swap times
-  using CacheEvent = ares::Nintendo64::CPU::Profiler::CacheEvent;
-  static std::vector<CacheEvent> cacheEvents;  //window-relative, oldest first
-
-  // Synthetic on-screen width for an RDP flush: the RDP has no per-command timing,
-  // so a flush block is sized by its command count
-  static constexpr u64 rdpTicksPerCmd = 64;
-
   // Window length selector: integer multiples of one VI period (~16.67 ms at the NTSC 60 Hz field rate). viTicks = 187.5 MHz / 60.
   static constexpr u64 viTicks = 3'125'000;
   static const char* windowItems[] = {
@@ -160,211 +82,19 @@ auto DrawFlameChart() -> void {
   static int windowIdx = 1;  //default: 2 VI
   u64 windowTicks = (u64)windowMul[windowIdx] * viTicks;
 
-  auto& rcap = ares::Nintendo64::rsp.capture;
-
-  // Collect the spans whose [start,end] intersects the window. Both rings are
-  // appended in end order (now() is monotonic), so we walk back from the newest
-  // entry and stop at the first span that ends before the window
-  // everything older is outside it. Spans that began before the window clamp their start to
-  // 0 (they were already running at the window's left edge).
-  static u64 winStart = 0;
-  static u64 rightEdge = 0;
-  static bool ringFull = false;
-  static bool cacheRingFull = false;
-
-  // Collection-time decimation. A wide window can hold hundreds of thousands of CPU
-  // spans (the ring caps at maxSpans), and copying + sorting all of them every UI
-  // frame is the dominant cost. At any zoom only ~1 span per (depth, screen
-  // pixel) is visible, so we drop narrow spans that land in an already-occupied
-  // cell, using the PREVIOUS frame's view (computed below, stored at end of frame)
-  // in absolute ticks so it doesn't drift as the window slides. Wide spans (the
-  // overview structure) are always kept. The exact per-pixel merge still happens at
-  // draw time; this is just a count cap so the sort stays cheap. One-frame-stale
-  // zoom is imperceptible.
-  static constexpr u32 GCols = 4096, GDepth = 96;
-  static std::vector<u32> seenGen;
-  static u32 decimGen = 0;
-  static u64 lastViewAbs = 0;     //absolute tick at the left edge of last frame's view
-  static f64 lastPxPerTick = 0.0; //last frame's pixels-per-tick (0 = not ready)
-  if(seenGen.empty()) seenGen.resize((size_t)GCols * GDepth, 0);
-
-  // Refresh policy. While the game runs, the chart only re-collects when a new VI
-  // has been presented, and the window is pinned to that VI: a stable picture per
-  // frame instead of a constantly sliding one. While paused or single-stepping
-  // (frame, RSP or RDP step) nothing moves on its own, so collect every UI frame
-  // to show step progress live, up to the current instant.
-  auto& stepRsp = ares::Nintendo64::rsp.capture;
-  auto& stepRdp = ares::Nintendo64::rdp.capture;
-  bool running = !program.paused && !stepRsp.stepMode.load(std::memory_order_relaxed)
-                                 && !stepRdp.stepMode.load(std::memory_order_relaxed);
-  static u64 collectedViWrite = ~0ull;
-  static int collectedWindowIdx = -1;
-  static bool collectedRunning = false;
-  u64 viWriteNow = prof.viMarkWrite.load(std::memory_order_acquire);
-  bool refresh = !running || !collectedRunning || viWriteNow != collectedViWrite
-              || collectedWindowIdx != windowIdx;
-  collectedRunning = running;
-
-  if(refresh) {
-  collectedViWrite = viWriteNow;
-  collectedWindowIdx = windowIdx;
-  rightEdge = prof.now();
-  if(running && viWriteNow > 0) {
-    //pin the right edge to the newest VI (anything newer shows up with the next one)
-    u64 lastVi = prof.viMarks[(viWriteNow - 1) % prof.maxViMarks];
-    if(lastVi <= rightEdge) rightEdge = lastVi;
-  }
-  winStart = rightEdge > windowTicks ? rightEdge - windowTicks : 0;
-  decimGen++;
-
-  spans.clear();
-  u64 w = prof.timelineWrite.load(std::memory_order_acquire);
-  u64 n = std::min<u64>(w, prof.maxSpans);
-  for(u64 i = 0; i < n; i++) {
-    const Span& s = prof.timeline[(w - 1 - i) % prof.maxSpans];
-    if(s.end < winStart) break;
-    if(s.start > rightEdge) continue;  //began after the pinned VI
-    if(lastPxPerTick > 0.0) {  //decimate narrow spans to ~1 per pixel per depth
-      f64 px0 = ((f64)s.start - (f64)lastViewAbs) * lastPxPerTick;
-      f64 px1 = ((f64)s.end   - (f64)lastViewAbs) * lastPxPerTick;
-      if(px1 - px0 < 1.5) {
-        u32 c = (u32)std::clamp(px0, 0.0, (f64)(GCols - 1));
-        u32 d = s.depth < GDepth ? s.depth : GDepth - 1;
-        u32& g = seenGen[(size_t)d * GCols + c];
-        if(g == decimGen) continue;  //cell already has a span
-        g = decimGen;
-      }
-    }
-    CpuSpan t;
-    t.funcAddr = s.funcAddr;
-    t.depth = s.depth;
-    t.isException = s.isException;
-    t.start = s.start > winStart ? s.start - winStart : 0;
-    t.end   = std::min(s.end, rightEdge) > winStart ? std::min(s.end, rightEdge) - winStart : 0;
-    spans.push_back(t);
-  }
-  ringFull = (n == prof.maxSpans);  //walked the whole ring; oldest may be dropped
-
-  // Calls that are still on the stack. popFrame() is what appends to the ring, so
-  // a function that entered before the window (or inside it) and has not returned
-  // yet contributes nothing above — the chart would show a hole exactly where the
-  // most interesting long-running call is. Synthesise a span per open frame that
-  // runs to the right edge (= now). Added after the decimation loop so these are
-  // never dropped, and before the sort so they interleave correctly.
-  {
-    u32 od = prof.openDepth.load(std::memory_order_acquire);
-    od = std::min<u32>(od, ares::Nintendo64::CPU::Profiler::maxOpenFrames);
-    for(u32 d = 0; d < od; d++) {
-      const auto& of = prof.openFrames[d];
-      //A pop+push racing this read can hand us a stale slot; drop anything that
-      //cannot be a live frame rather than drawing a bar off in the future.
-      if(of.start > rightEdge) continue;
-      CpuSpan t;
-      t.start = of.start > winStart ? of.start - winStart : 0;
-      t.end = rightEdge - winStart;
-      t.funcAddr = of.funcAddr;
-      t.depth = (u16)d;
-      t.isException = of.isException;
-      t.ongoing = true;
-      spans.push_back(t);
-    }
-  }
-
-  std::sort(spans.begin(), spans.end(),
-            [](const CpuSpan& a, const CpuSpan& b) { return a.start < b.start; });
-
-  rspSpans.clear();
-  u64 rw = rcap.timelineWrite.load(std::memory_order_acquire);
-  u64 rn = std::min<u64>(rw, rcap.maxTimeline);
-  for(u64 i = 0; i < rn; i++) {
-    const auto& s = rcap.timeline[(rw - 1 - i) % rcap.maxTimeline];
-    if(s.end < winStart) break;
-    if(s.start > rightEdge) continue;
-    u64 rs = s.start > winStart ? s.start - winStart : 0;
-    u64 re = std::min(s.end, rightEdge) > winStart ? std::min(s.end, rightEdge) - winStart : 0;
-    rspSpans.push_back({rs, re, s.overlayId, s.commandId, s.overhead, s.overheadType});
-  }
-  std::sort(rspSpans.begin(), rspSpans.end(),
-            [](const RspSpan& a, const RspSpan& b) { return a.start < b.start; });
-
-  // RSP hardware halt/break intervals (the bar below the command stream). Closed
-  // intervals from the ring, plus the still-open halt drawn live up to the right
-  // edge so a currently-stopped RSP shows immediately.
-  haltSpans.clear();
-  u64 hw = rcap.haltWrite.load(std::memory_order_acquire);
-  u64 hn = std::min<u64>(hw, rcap.maxHaltSpans);
-  for(u64 i = 0; i < hn; i++) {
-    const auto& s = rcap.haltSpans[(hw - 1 - i) % rcap.maxHaltSpans];
-    if(s.end < winStart) break;
-    if(s.start > rightEdge) continue;
-    u64 hs = s.start > winStart ? s.start - winStart : 0;
-    u64 he = std::min(s.end, rightEdge) > winStart ? std::min(s.end, rightEdge) - winStart : 0;
-    haltSpans.emplace_back(hs, he);
-  }
-  if(rcap.haltOpen.load(std::memory_order_acquire)) {
-    u64 hStart = rcap.haltStartWall.load(std::memory_order_relaxed);
-    if(hStart <= rightEdge) {
-      u64 hs = hStart > winStart ? hStart - winStart : 0;
-      haltSpans.emplace_back(hs, rightEdge - winStart);
-    }
-  }
-
-  // RDP: one block per DP flush, anchored at its real submit time with a
-  // count-proportional synthetic width. Walk back from newest; entries are
-  // start-ordered, so once a block's synthetic end falls before the window the
-  // rest are too.
-  auto& dcap = ares::Nintendo64::rdp.capture;
-  rdpSpans.clear();
-  u64 dw = dcap.timelineWrite.load(std::memory_order_acquire);
-  u64 dn = std::min<u64>(dw, dcap.maxTimeline);
-  for(u64 i = 0; i < dn; i++) {
-    const auto& s = dcap.timeline[(dw - 1 - i) % dcap.maxTimeline];
-    u64 end = s.start + (u64)s.count * rdpTicksPerCmd;
-    if(end < winStart) break;
-    if(s.start > rightEdge) continue;
-    end = std::min(end, rightEdge);
-    u64 ds = s.start > winStart ? s.start - winStart : 0;
-    u64 de = end     > winStart ? end     - winStart : 0;
-    rdpSpans.push_back({ds, de, s.count});
-  }
-  std::sort(rdpSpans.begin(), rdpSpans.end(),
-            [](const RdpSpan& a, const RdpSpan& b) { return a.start < b.start; });
-  // Clamp each flush so it never overruns the next one (synthetic widths can
-  // overlap when flushes are dense); keeps blocks readable and start times true.
-  for(size_t i = 0; i + 1 < rdpSpans.size(); i++)
-    rdpSpans[i].end = std::min(rdpSpans[i].end, rdpSpans[i + 1].start);
-
-  // VI framebuffer-swap markers within the window.
-  viMarks.clear();
-  u64 vw = prof.viMarkWrite.load(std::memory_order_acquire);
-  u64 vn = std::min<u64>(vw, prof.maxViMarks);
-  for(u64 i = 0; i < vn; i++) {
-    u64 m = prof.viMarks[(vw - 1 - i) % prof.maxViMarks];
-    if(m < winStart) break;
-    if(m <= rightEdge) viMarks.push_back(m - winStart);
-  }
-
-  // Cache line transfers (icache fill, dcache fill / write-back) within the window
-  // (time made window-relative). Collected newest-first, then reversed so the
-  // lane can be walked in time order.
-  cacheEvents.clear();
-  u64 cw = prof.cacheEventWrite.load(std::memory_order_acquire);
-  u64 cn = prof.cacheEvents.size() == prof.maxCacheEvents ? std::min<u64>(cw, prof.maxCacheEvents) : 0;
-  for(u64 i = 0; i < cn; i++) {
-    CacheEvent e = prof.cacheEvents[(cw - 1 - i) % prof.maxCacheEvents];
-    if(e.time < winStart) break;
-    if(e.time > rightEdge) continue;
-    e.time -= winStart;
-    cacheEvents.push_back(e);
-  }
-  std::reverse(cacheEvents.begin(), cacheEvents.end());
-  cacheRingFull = (cn == prof.maxCacheEvents) && !cacheEvents.empty()
-               && cacheEvents.size() == cn;
-  }  //refresh
+  // The collected window (see FlameData::collect for the refresh policy).
+  // "Running" means nothing holds the emulation: not paused, not in an RSP/RDP
+  // step mode.
+  static FlameData data;
+  bool running = !program.paused
+              && !ares::Nintendo64::rsp.capture.stepMode.load(std::memory_order_relaxed)
+              && !ares::Nintendo64::rdp.capture.stepMode.load(std::memory_order_relaxed);
+  data.collect(windowTicks, windowIdx, running);
+  const auto& spans = data.spans;
+  const u32 maxDepth = data.maxDepth;
+  const u64 winStart = data.winStart;
 
   u64 frameTicks = windowTicks;  //axis/view length (kept name for the renderer below)
-  u32 maxDepth = 0;
-  for(auto& s : spans) maxDepth = std::max<u32>(maxDepth, s.depth);
 
   // --- view (pan/zoom) state, in window-relative ticks -----------------------
   static u64 viewStart = 0;
@@ -381,24 +111,33 @@ auto DrawFlameChart() -> void {
   ImGui::SameLine();
   ImGui::SetNextItemWidth(150.0_px);
   ImGui::Combo("Window", &windowIdx, windowItems, IM_ARRAYSIZE(windowItems));
+  //Cache lane options in a popup (before the counters, so they never shift):
+  //conflict-miss warnings per cache — data conflicts are noisier (DMA
+  //invalidates, streaming), so off by default — and the reuse distance below
+  //which a conflict gets a warning triangle.
   ImGui::SameLine();
-  {
-    using Prof = ares::Nintendo64::CPU::Profiler;
-    u64 kindCount[Prof::CacheKinds] = {};
-    for(auto& e : cacheEvents) kindCount[e.kind]++;
-    u64 cacheT = 0;
-    for(u32 k = 0; k < Prof::CacheKinds; k++) cacheT += kindCount[k] * Prof::cacheTicks[k];
-    char cTime[48]; fmtTime((f64)cacheT, cTime, sizeof(cTime));
-    ImGui::Text("cpu: %zu (max depth: %u)   rsp: %zu   rdp: %zu   halt: %zu   cache: icache %llu  dcache in %llu / out %llu (%s)",
-                spans.size(), maxDepth + 1, rspSpans.size(), rdpSpans.size(), haltSpans.size(),
-                (unsigned long long)kindCount[Prof::CacheIFill], (unsigned long long)kindCount[Prof::CacheDFill],
-                (unsigned long long)kindCount[Prof::CacheDWrite], cTime);
+  if(ImGui::Button("Cache...")) ImGui::OpenPopup("##cacheOptions");
+  if(ImGui::BeginPopup("##cacheOptions")) {
+    ImGui::TextDisabled("Conflict-miss warnings");
+    ImGui::Checkbox("ICache", &settings.general.flameWarnICache);
+    ImGui::SameLine();
+    ImGui::Checkbox("DCache", &settings.general.flameWarnDCache);
+    int threshold = (int)settings.general.flameWarnThreshold;
+    ImGui::SetNextItemWidth(180.0_px);
+    if(ImGui::SliderInt("Triangle below", &threshold, 1, 256, "%d fills", ImGuiSliderFlags_Logarithmic)) {
+      settings.general.flameWarnThreshold = (u32)threshold;
+    }
+    ImGui::TextDisabled("a line refetched within this many fills\nof being evicted gets a warning triangle");
+    ImGui::EndPopup();
   }
-  if(ringFull) {
+  ImGui::SameLine();
+  ImGui::Text("cpu: %zu (max depth: %u)   rsp: %zu   rdp: %zu   halt: %zu",
+              spans.size(), maxDepth + 1, data.rspSpans.size(), data.rdpSpans.size(), data.haltSpans.size());
+  if(data.ringFull) {
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "(span cap hit)");
   }
-  if(cacheRingFull) {
+  if(data.cacheRingFull) {
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "(cache event cap hit)");
   }
@@ -407,6 +146,7 @@ auto DrawFlameChart() -> void {
   // --- canvas ----------------------------------------------------------------
   const f32 rowH = 18.0_px;
   const f32 axisH = 18.0_px;
+  const f32 axisGap = 12.0_px;  //room below the axis for the Cache lane's warning triangles
   ImVec2 origin = ImGui::GetCursorScreenPos();
   ImVec2 avail = ImGui::GetContentRegionAvail();
   if(avail.x < 50) avail.x = 50;
@@ -423,9 +163,9 @@ auto DrawFlameChart() -> void {
   static f32 laneScroll = 0.0f;
   const f32 laneGap = 19.0_px;  //divider+label gap above each device lane
   const f32 haltH = 6.0_px;     //thin RSP halt/stopped indicator bar
-  f32 contentH = (15.0_px + rowH + 4.0_px) /*ICache*/ + (maxDepth + 1) * rowH
+  f32 contentH = cacheLaneHeight(rowH) + (maxDepth + 1) * rowH
               + (laneGap + rowH + haltH) /*RSP + halt bar*/ + (laneGap + rowH) /*RDP*/;
-  f32 visibleH = avail.y - axisH;
+  f32 visibleH = avail.y - axisH - axisGap;
   f32 maxScroll = std::max(0.0f, contentH - visibleH);
 
   // Zoom around cursor on wheel (Shift+wheel scrolls vertically); pan on drag.
@@ -477,12 +217,27 @@ auto DrawFlameChart() -> void {
   f64 pxPerTick = avail.x / (f64)viewSpan;
   u64 viewEnd = viewStart + viewSpan;
   // Publish this frame's view (in absolute ticks) for next frame's collection-time decimation grid.
-  lastViewAbs = winStart + viewStart;
-  lastPxPerTick = pxPerTick;
-  f32 lanesTop = origin.y + axisH - laneScroll;
-  const f32 cacheLaneH = 15.0_px + rowH + 4.0_px;  //label + bar row + gap (see Cache lane)
-  f32 cpuTop = lanesTop + cacheLaneH;
+  data.lastViewAbs = winStart + viewStart;
+  data.lastPxPerTick = pxPerTick;
+  f32 lanesTop = origin.y + axisH + axisGap - laneScroll;
+  f32 cpuTop = lanesTop + cacheLaneHeight(rowH);
   f32 clipTop = origin.y + axisH;  //lanes are clipped below the pinned axis
+
+  FlameView view;
+  view.dl = dl;
+  view.origin = origin;
+  view.avail = avail;
+  view.canvasR = origin.x + avail.x;
+  view.canvasB = origin.y + avail.y;
+  view.clipTop = clipTop;
+  view.rowH = rowH;
+  view.viewStart = viewStart;
+  view.viewEnd = viewEnd;
+  view.pxPerTick = pxPerTick;
+  view.hovered = hovered;
+  view.mouse = io.MousePos;
+  const f32 canvasR = view.canvasR;
+  const f32 canvasB = view.canvasB;
 
   // Time axis ticks (~every 120px), labelled in us/ms relative to window start.
   {
@@ -507,6 +262,10 @@ auto DrawFlameChart() -> void {
   // overdraw the axis labels.
   dl->PushClipRect(ImVec2(origin.x, clipTop), ImVec2(origin.x + avail.x, origin.y + avail.y), true);
 
+  // --- Cache lane: first, directly above the CPU call stack --------------------
+  CacheHover chover = drawCacheLane(view, data, lanesTop);
+
+  // --- CPU lane: the call stack ------------------------------------------------
   // Spans, sorted by start: iterate and cull. Break once a span starts past the
   // view (nothing later can overlap); skip those entirely left of it.
   //
@@ -515,73 +274,8 @@ auto DrawFlameChart() -> void {
   // that would add less than a pixel of new content in its row is skipped. This
   // caps the rect count at ~canvas-width * depth regardless of how many spans the
   // window holds. Hovering individual spans only matters when zoomed in (where spans are wider than a pixel and nothing coalesces).
-  // Cache lane hover: the transfers merged into the bar under the cursor (zoomed
-  // out, many share the same few pixels).
-  u32 choverCount = 0;
-  u64 choverEnd = 0;                   //end tick of the last transfer in the hovered bar
-  const CacheEvent* chover = nullptr;  //first transfer of the hovered bar
-  {
-    using Prof = ares::Nintendo64::CPU::Profiler;
-    f32 canvasR = origin.x + avail.x;
-    f32 canvasB = origin.y + avail.y;
-    // --- Cache lane: one bar per cache line transfer ---------------------------
-    // First lane, directly above the CPU call stack so transfers line up with the
-    // functions below them. icache fills, dcache fills (in) and dcache write-backs
-    // (out) share the row: the CPU does one at a time, so they never overlap.
-    // Each bar spans its real duration and is colored by kind. Consecutive
-    // transfers of the same kind whose bars would touch on screen merge into one
-    // bar (for drawing and hover); all bars have the same height.
-    static const ImU32 kindColor[Prof::CacheKinds] = {
-      IM_COL32(230, 115, 115, 255),  //icache fill: soft red
-      IM_COL32(110, 205, 125, 255),  //dcache fill (in): green
-      IM_COL32(100, 155, 240, 255),  //dcache write-back (out): blue
-    };
-    f32 labelY = lanesTop + 1.0_px;
-    f32 rowTop = labelY + 15.0_px;
-    dl->AddLine(ImVec2(origin.x, cpuTop - 2.0_px), ImVec2(origin.x + avail.x, cpuTop - 2.0_px), IM_COL32(70, 70, 80, 200));
-    if(rowTop <= canvasB && rowTop + rowH >= clipTop) {
-      f32 barBottom = rowTop + rowH - 1.0f;
-      f32 barH = (barBottom - (labelY + 2.0_px)) * 0.5f;
-      const f32 minW = 2.0_px;
-      bool mouseInLane = hovered && io.MousePos.y >= barBottom - barH && io.MousePos.y <= barBottom;
-      auto toX = [&](u64 t) { return origin.x + (f32)(((s64)t - (s64)viewStart) * pxPerTick); };
-      size_t i = 0;
-      while(i < cacheEvents.size()) {
-        const auto& e = cacheEvents[i];
-        if(e.time > viewEnd) break;
-        u64 dur = Prof::cacheTicks[e.kind];
-        f32 x0 = toX(e.time);
-        f32 x1 = std::max(toX(e.time + dur), x0 + minW);
-        size_t j = i + 1;  //absorb following transfers of the same kind that would touch this bar
-        u64 lastEnd = e.time + dur;
-        while(j < cacheEvents.size()) {
-          const auto& n = cacheEvents[j];
-          if(n.kind != e.kind) break;
-          f32 nx0 = toX(n.time);
-          if(nx0 > x1 + 1.0f) break;
-          x1 = std::max(x1, std::max(toX(n.time + dur), nx0 + minW));
-          lastEnd = n.time + dur;
-          j++;
-        }
-        u32 count = (u32)(j - i);
-        if(x1 >= origin.x && x0 < canvasR) {
-          f32 cx0 = std::max(x0, origin.x), cx1 = std::min(x1, canvasR);
-          bool isHover = mouseInLane && !chover && io.MousePos.x >= cx0 - 1.0_px && io.MousePos.x <= cx1 + 1.0_px;
-          if(isHover) { chover = &e; choverCount = count; choverEnd = lastEnd; }
-          ImU32 col = isHover ? IM_COL32(255, 255, 255, 255) : kindColor[e.kind];
-          dl->AddRectFilled(ImVec2(cx0, barBottom - barH), ImVec2(cx1, barBottom), col);
-        }
-        i = j;
-      }
-    }
-    //label last: keep it readable over the bars
-    dl->AddText(ImVec2(origin.x + 3_px, labelY + 1_px), IM_COL32(255, 200, 120, 255), "Cache");
-  }
-
   static std::vector<f32> rowMaxX;
   rowMaxX.assign((size_t)maxDepth + 2, -1e9f);
-  f32 canvasR = origin.x + avail.x;
-  f32 canvasB = origin.y + avail.y;
   const CpuSpan* hover = nullptr;
   for(auto it = spans.begin(); it != spans.end(); ++it) {
     const CpuSpan& s = *it;
@@ -638,10 +332,10 @@ auto DrawFlameChart() -> void {
     f32 labelY = cpuBottom + 4.0_px;
     f32 rspTop = labelY + 15.0_px;
     dl->AddLine(ImVec2(origin.x, labelY), ImVec2(origin.x + avail.x, labelY), IM_COL32(70, 70, 80, 200));
-    dl->AddText(ImVec2(origin.x + 3_px, labelY + 1_px), IM_COL32(150, 200, 255, 255), "RSP");
+    laneLabel(dl, ImVec2(origin.x + 3_px, labelY + 1_px), IM_COL32(150, 200, 255, 255), "RSP");
 
     f32 rspMaxX = -1e9f;  //per-row pixel coalescing (see CPU lane)
-    for(auto it = rspSpans.begin(); it != rspSpans.end(); ++it) {
+    for(auto it = data.rspSpans.begin(); it != data.rspSpans.end(); ++it) {
       const RspSpan& s = *it;
       if(s.start > viewEnd) break;
       if(s.end < viewStart) continue;
@@ -681,7 +375,7 @@ auto DrawFlameChart() -> void {
     {
       f32 hy0 = rspTop + rowH;
       f32 hy1 = hy0 + haltH - 1.0f;
-      for(auto& hsp : haltSpans) {
+      for(auto& hsp : data.haltSpans) {
         if(hsp.first > viewEnd || hsp.second < viewStart) continue;
         f32 x0 = origin.x + (f32)(((s64)hsp.first  - (s64)viewStart) * pxPerTick);
         f32 x1 = origin.x + (f32)(((s64)hsp.second - (s64)viewStart) * pxPerTick);
@@ -698,9 +392,9 @@ auto DrawFlameChart() -> void {
     f32 rdpLabelY = rspTop + rowH + haltH + 4.0_px;
     f32 rdpTop = rdpLabelY + 15.0_px;
     dl->AddLine(ImVec2(origin.x, rdpLabelY), ImVec2(origin.x + avail.x, rdpLabelY), IM_COL32(70, 70, 80, 200));
-    dl->AddText(ImVec2(origin.x + 3_px, rdpLabelY + 1_px), IM_COL32(150, 255, 200, 255), "RDP");
+    laneLabel(dl, ImVec2(origin.x + 3_px, rdpLabelY + 1_px), IM_COL32(150, 255, 200, 255), "RDP");
 
-    for(auto it = rdpSpans.begin(); it != rdpSpans.end(); ++it) {
+    for(auto it = data.rdpSpans.begin(); it != data.rdpSpans.end(); ++it) {
       const RdpSpan& s = *it;
       if(s.start > viewEnd) break;
       if(s.end < viewStart) continue;
@@ -728,14 +422,15 @@ auto DrawFlameChart() -> void {
         dl->PopClipRect();
       }
     }
-
   }
 
   dl->PopClipRect();  //lanes clip
 
+  drawCacheWarnings(view);
+
   // VI framebuffer-swap markers: vertical lines over the whole canvas, drawn last
   // (above the lanes) so frame boundaries stay visible.
-  for(u64 m : viMarks) {
+  for(u64 m : data.viMarks) {
     if(m < viewStart || m > viewEnd) continue;
     f32 x = origin.x + (f32)(((s64)m - (s64)viewStart) * pxPerTick);
     dl->AddLine(ImVec2(x, origin.y + axisH), ImVec2(x, origin.y + avail.y), IM_COL32(255, 90, 90, 150), 1.0_px);
@@ -789,37 +484,7 @@ auto DrawFlameChart() -> void {
     ImGui::EndTooltip();
   }
 
-  // Cache transfer tooltip: kind, cost, the line, and who was running.
-  if(chover) {
-    using Prof = ares::Nintendo64::CPU::Profiler;
-    static const char* kindName[Prof::CacheKinds] = {"icache fill", "dcache fill (in)", "dcache write-back (out)"};
-    static const char* kindPlural[Prof::CacheKinds] = {"icache fills", "dcache fills (in)", "dcache write-backs (out)"};
-    u32 k = chover->kind;
-    u32 bytes = Prof::cacheBytes[k];
-    ImGui::BeginTooltip();
-    char dbuf[48];
-    if(choverCount > 1) {
-      fmtTimeCyc((f64)(choverCount * Prof::cacheTicks[k]), dbuf, sizeof(dbuf));
-      ImGui::Text("%u %s (%u bytes)", choverCount, kindPlural[k], choverCount * bytes);
-      ImGui::Text("transfer time: %s", dbuf);
-      char sbuf[48]; fmtTimeCyc((f64)(choverEnd - chover->time), sbuf, sizeof(sbuf));
-      ImGui::Text("spread over: %s", sbuf);
-    } else {
-      fmtTimeCyc((f64)Prof::cacheTicks[k], dbuf, sizeof(dbuf));
-      ImGui::Text("%s (%u bytes)", kindName[k], bytes);
-      ImGui::Text("duration: %s", dbuf);
-    }
-    ImGui::Separator();
-    if(choverCount > 1) ImGui::TextDisabled("first of this bar:");
-    char tbuf[48]; fmtTimeCyc((f64)chover->time, tbuf, sizeof(tbuf));
-    ImGui::Text("at: %s", tbuf);
-    ImGui::Text("line: 0x%08X - 0x%08X", chover->paddr, chover->paddr + bytes - 1);
-    string target = prof.labelFor(0x8000'0000u | chover->paddr);
-    ImGui::Text(k == Prof::CacheIFill ? "fetched code: %s" : "data at: %s", target.data());
-    string running = chover->funcAddr ? prof.labelFor(chover->funcAddr) : string{"(no tracked call)"};
-    ImGui::Text("while in: %s", running.data());
-    ImGui::EndTooltip();
-  }
+  drawCacheTooltip(data, chover);
 
   // Hover tooltip: function name, duration, % of frame.
   if(hover) {
