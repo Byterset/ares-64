@@ -1580,6 +1580,73 @@ struct CPU : Thread {
     auto now() -> u64;   //master-clock wall timebase (the CPU is primary, runs continuously)
   } profiler;
 
+  //exectrace.cpp — CPU execution trace for offline instruction-cache analysis.
+  //While active, writes executed KSEG0 PC ranges, icache line fills, frame marks
+  //and resets to a binary file. The stream does not depend on the code layout:
+  //an external cache simulator can replay it against a relinked executable.
+  //Emulation thread only.
+  struct ExecTrace {
+    enum : u32 {
+      RecordRange    = 0,   //a = first pc, b = end pc (exclusive), low 28 bits = repeat count
+      RecordFrame    = 1,   //a = frame number, b = low 32 bits of CPU cycles
+      RecordFill     = 2,   //a = physical address of the filled icache line
+      RecordUncached = 3,   //a = instructions executed outside KSEG0
+      RecordReset    = 4,   //machine power/reset: every icache line became invalid
+      RecordTotals   = 15,  //written by stop(), subtype in the low bits (Total*)
+    };
+    enum : u32 {
+      TotalInstructions = 0,  //a/b = KSEG0 instructions (low/high)
+      TotalFills        = 1,  //a/b = icache fills (low/high)
+      TotalFlags        = 2,  //a bit 0 = truncated by maxBytes, b = frames
+    };
+    static constexpr u32 version = 1;
+    static constexpr u32 headerBytes = 8 + 4 * 4 + 8 + 512 * 4;
+    static constexpr u32 countMask = 0x0fff'ffff;
+    static constexpr u32 bufferBytes = 1 << 20;
+
+    struct Stats {
+      u64 records = 0;
+      u64 instructions = 0;  //KSEG0 (cached) instructions
+      u64 uncached = 0;      //instructions outside KSEG0
+      u64 fills = 0;         //icache line fills, exact for interpreter and recompiler
+      u64 frames = 0;
+      u64 bytes = 0;
+      bool truncated = false;
+      s64 icacheHits = 0;    //core counter deltas (the recompiler only maintains
+      s64 icacheMisses = 0;  //them in homebrew mode)
+    };
+
+    auto active() const -> bool { return file != nullptr; }
+    auto start(const string& path, u64 maxBytes) -> string;  //"" or an error message
+    auto stop(Stats& out) -> string;
+    auto onInstruction(u64 address) -> void;
+    auto onIcacheFill(u32 lineAddress) -> void;
+    auto onFrame(u64 frame) -> void;
+    auto onPower() -> void;
+
+    auto closeRun() -> void;
+    auto flushPendingRange() -> void;
+    auto flushUncached() -> void;
+    auto flushAll() -> void;
+    auto put(u32 a, u32 b, u32 typeAndCount) -> void;
+    auto writeBuffer() -> void;
+
+    std::FILE* file = nullptr;
+    std::vector<u8> buffer;
+    u64 maxBytes = 0;
+    bool failed = false;
+    Stats stats;
+    s64 startHits = 0;
+    s64 startMisses = 0;
+    bool runOpen = false;     //sequential run being extended: [runStart, runEnd)
+    u32 runStart = 0;
+    u32 runEnd = 0;
+    u32 pendingStart = 0;     //last completed run, held back to fold repeats
+    u32 pendingEnd = 0;
+    u32 pendingCount = 0;
+    u32 uncachedRun = 0;      //uncached instructions not yet written
+  } execTrace;
+
   struct EmuxState {
     n64 excMask;
   } emuxState;

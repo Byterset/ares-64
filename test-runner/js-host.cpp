@@ -342,6 +342,82 @@ auto js_frameCount(JSContext*, JSValueConst, int, JSValueConst*) -> JSValue {
   return JS_NewInt64(g_ctx, emulatorRunner.frame());
 }
 
+//--- CPU execution trace -----------------------------------------------------
+
+auto js_setRecompiler(JSContext* c, JSValueConst, int argc, JSValueConst* argv) -> JSValue {
+  if(emulatorRunner.loaded()) return throwError(c, "setRecompiler must be called before loadRom");
+  emulatorRunner.recompiler = argc < 1 || JS_ToBool(c, argv[0]);
+  return JS_UNDEFINED;
+}
+
+auto js_cpuTraceStart(JSContext* c, JSValueConst, int argc, JSValueConst* argv) -> JSValue {
+  { JSValue g = requireNotInCallback(c, "cpuTraceStart()"); if(JS_IsException(g)) return g; }
+  if(argc < 1 || !JS_IsString(argv[0])) return throwError(c, "cpuTraceStart(path [, {maxBytes}]) requires a path");
+  int64_t maxBytes = 0;
+  if(argc >= 2 && JS_IsObject(argv[1])) {
+    JSValue v = JS_GetPropertyStr(c, argv[1], "maxBytes");
+    bool bad = !JS_IsUndefined(v) && JS_ToInt64(c, &maxBytes, v) < 0;
+    JS_FreeValue(c, v);
+    if(bad) return JS_EXCEPTION;
+    if(maxBytes < 0) return throwError(c, "cpuTraceStart: maxBytes must be >= 0");
+  }
+  if(auto err = emulatorRunner.cpuTraceStart(jsStr(c, argv[0]), (u64)maxBytes)) return throwError(c, err);
+  return JS_UNDEFINED;
+}
+
+auto js_cpuTraceStop(JSContext* c, JSValueConst, int, JSValueConst*) -> JSValue {
+  { JSValue g = requireNotInCallback(c, "cpuTraceStop()"); if(JS_IsException(g)) return g; }
+  ares::Nintendo64::CPU::ExecTrace::Stats s;
+  if(auto err = emulatorRunner.cpuTraceStop(s)) return throwError(c, err);
+  JSValue obj = JS_NewObject(c);
+  auto number = [&](const char* name, double value) { JS_SetPropertyStr(c, obj, name, JS_NewFloat64(c, value)); };
+  number("records", (double)s.records);
+  number("instructions", (double)s.instructions);
+  number("uncached", (double)s.uncached);
+  number("fills", (double)s.fills);
+  number("frames", (double)s.frames);
+  number("bytes", (double)s.bytes);
+  number("icacheHits", (double)s.icacheHits);
+  number("icacheMisses", (double)s.icacheMisses);
+  JS_SetPropertyStr(c, obj, "truncated", JS_NewBool(c, s.truncated));
+  return obj;
+}
+
+//ares.writeFile(path, text): write a UTF-8 text file. Scripts have no libc
+//module (quickjs is built without it), and a capture needs to drop a small
+//sidecar next to its trace saying which build produced it.
+auto js_writeFile(JSContext* c, JSValueConst, int argc, JSValueConst* argv) -> JSValue {
+  if(argc < 2 || !JS_IsString(argv[0])) return throwError(c, "writeFile(path, text) requires a path and text");
+  string path = jsStr(c, argv[0]), text = jsStr(c, argv[1]);
+  if(!file::write(path, {(const u8*)text.data(), text.size()})) {
+    return throwError(c, {"failed to write: ", path});
+  }
+  return JS_UNDEFINED;
+}
+
+//ares.fileSha256(path): hex digest of a file on disk. A capture identifies the
+//ELF its ROM was built from this way, so the scenario script needs no external
+//hashing step.
+auto js_fileSha256(JSContext* c, JSValueConst, int argc, JSValueConst* argv) -> JSValue {
+  if(argc < 1 || !JS_IsString(argv[0])) return throwError(c, "fileSha256(path) requires a path");
+  string path = jsStr(c, argv[0]);
+  if(!file::exists(path)) return throwError(c, {"no such file: ", path});
+  auto data = file::read(path);
+  Hash::SHA256 hash{{data.data(), data.size()}};
+  //lower case: every other tool in this pipeline spells digests that way
+  return JS_NewString(c, string{hash.digest()}.downcase());
+}
+
+auto js_cpuCacheStats(JSContext* c, JSValueConst, int, JSValueConst*) -> JSValue {
+  if(!emulatorRunner.loaded()) return throwError(c, "no ROM loaded");
+  auto& p = ares::Nintendo64::cpu.profile;
+  JSValue obj = JS_NewObject(c);
+  JS_SetPropertyStr(c, obj, "cpuCycles", JS_NewFloat64(c, (double)p.cpuCycles));
+  JS_SetPropertyStr(c, obj, "icacheHits", JS_NewFloat64(c, (double)p.icacheHits));
+  JS_SetPropertyStr(c, obj, "icacheMisses", JS_NewFloat64(c, (double)p.icacheMisses));
+  return obj;
+}
+
 //--- RSP profiling ----------------------------------------------------------
 
 auto js_rspProfileStart(JSContext* c, JSValueConst, int, JSValueConst*) -> JSValue {
@@ -1230,6 +1306,7 @@ auto jsHostInit(const std::vector<string>& scriptArgs) -> bool {
   setFn(g_ctx, ares, "isPaused", js_isPaused, 0);
   setFn(g_ctx, ares, "setRenderer", js_setRenderer, 1);
   setFn(g_ctx, ares, "setHomebrew", js_setHomebrew, 1);
+  setFn(g_ctx, ares, "setRecompiler", js_setRecompiler, 1);
   setFn(g_ctx, ares, "wait", js_wait, 1);
   setFn(g_ctx, ares, "waitFrames", js_waitFrames, 1);
   setFn(g_ctx, ares, "waitVI", js_waitVI, 0);
@@ -1238,6 +1315,11 @@ auto jsHostInit(const std::vector<string>& scriptArgs) -> bool {
   setFn(g_ctx, ares, "rspProfile", js_rspProfile, 0);
   setFn(g_ctx, ares, "waitRspCommand", js_waitRspCommand, 1);
   setFn(g_ctx, ares, "rspTrace", js_rspTrace, 1);
+  setFn(g_ctx, ares, "cpuTraceStart", js_cpuTraceStart, 2);
+  setFn(g_ctx, ares, "cpuTraceStop", js_cpuTraceStop, 0);
+  setFn(g_ctx, ares, "cpuCacheStats", js_cpuCacheStats, 0);
+  setFn(g_ctx, ares, "writeFile", js_writeFile, 2);
+  setFn(g_ctx, ares, "fileSha256", js_fileSha256, 1);
   setFn(g_ctx, ares, "controller", js_controller, 1);
   setFn(g_ctx, ares, "screenshot", js_screenshot, 0);
   setFn(g_ctx, ares, "loadImage", js_loadImage, 1);

@@ -173,6 +173,40 @@
       }
     },
     {
+      "name": "linux-headless-debug",
+      "displayName": "Linux headless test runner (debug tools)",
+      "description": "As linux-headless, plus the debug tools the CPU execution trace and RSP profiler need",
+      "inherits": ["linux-headless"],
+      "binaryDir": "${sourceDir}/build_headless_debug",
+      "cacheVariables": {
+        "ARES_ENABLE_DEBUG_TOOLS": true
+      }
+    },
+    {
+      "name": "windows-headless",
+      "displayName": "Windows headless test runner (MSYS2 clang64, debug tools)",
+      "description": "ares-test CLI built with MSYS2 clang64 + Ninja; includes the debug tools the CPU execution trace needs",
+      "inherits": ["baseCacheVars"],
+      "condition": {
+        "type": "anyOf",
+        "conditions": [
+          {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+          {"type": "equals", "lhs": "${hostSystemName}", "rhs": "MSYS"}
+        ]
+      },
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_msys",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": {"type": "STRING", "value": "Release"},
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "ARES_BUILD_HEADLESS": true,
+        "ARES_ENABLE_VULKAN": false,
+        "ARES_ENABLE_DEBUG_TOOLS": true,
+        "ENABLE_CCACHE": false
+      }
+    },
+    {
       "name": "ubuntu-ci",
       "displayName": "Ubuntu CI (x64 gcc)",
       "description": "Single-arch binary for building on Github Actions",
@@ -205,6 +239,20 @@
       "displayName": "Windows build (host architecture)",
       "description": "Windows build (host architecture)",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "windows-headless",
+      "configurePreset": "windows-headless",
+      "displayName": "Windows headless test runner",
+      "description": "Builds only ares-test",
+      "targets": ["ares-test"]
+    },
+    {
+      "name": "linux-headless-debug",
+      "configurePreset": "linux-headless-debug",
+      "displayName": "Linux headless test runner (debug tools)",
+      "description": "Builds only ares-test",
+      "targets": ["ares-test"]
     }
   ]
 }

@@ -30,7 +30,7 @@ auto EmulatorRunner::loadRom(const string& path) -> string {
   ares::Nintendo64::option("RDP Renderer", renderer);
   ares::Nintendo64::option("Homebrew Mode", homebrewMode);
   ares::Nintendo64::option("Deterministic Entropy", "true");
-  ares::Nintendo64::option("Recompiler", "true");
+  ares::Nintendo64::option("Recompiler", recompiler);
   ares::Nintendo64::option("Expansion Pak", "true");
 
   //the region list can contain several entries (e.g. "NTSC-U,PAL"): prefer NTSC
@@ -84,6 +84,10 @@ auto EmulatorRunner::loadRom(const string& path) -> string {
 
 auto EmulatorRunner::closeRom() -> void {
   if(!root) return;
+  if(ares::Nintendo64::cpu.execTrace.active()) {
+    ares::Nintendo64::CPU::ExecTrace::Stats discarded;
+    ares::Nintendo64::cpu.execTrace.stop(discarded);  //finish the file before the core goes away
+  }
   root->unload();  //joins the screen worker thread; no save files are written
   root.reset();
   gamePak.reset();
@@ -120,6 +124,7 @@ auto EmulatorRunner::runSlice() -> void {
   //for ROMs that never enable the display (they simply never present a frame).
   root->run();
   ++frameCount;
+  ares::Nintendo64::cpu.execTrace.onFrame(frameCount.load());
 }
 
 auto EmulatorRunner::runFrames(u32 frames) -> void {
@@ -140,6 +145,21 @@ auto EmulatorRunner::runSeconds(double seconds) -> void {
   if(!root || seconds <= 0) return;
   s64 target = cycles() + (s64)(seconds * cyclesPerSecond());
   while(cycles() < target && !stopRequested()) runSlice();
+}
+
+//--- CPU execution trace ---------------------------------------------------
+
+auto EmulatorRunner::cpuTraceStart(const string& path, u64 maxBytes) -> string {
+#if !ARES_DEBUG_TOOLS
+  return "ares was built without ARES_ENABLE_DEBUG_TOOLS; CPU tracing is unavailable";
+#else
+  if(!root) return "no ROM loaded";
+  return ares::Nintendo64::cpu.execTrace.start(path, maxBytes);
+#endif
+}
+
+auto EmulatorRunner::cpuTraceStop(ares::Nintendo64::CPU::ExecTrace::Stats& out) -> string {
+  return ares::Nintendo64::cpu.execTrace.stop(out);
 }
 
 //--- input -----------------------------------------------------------------
