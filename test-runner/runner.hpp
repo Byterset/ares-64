@@ -20,6 +20,7 @@ struct EmulatorRunner : ares::Platform {
   //--- configuration ---
   nall::string renderer = "angrylion";  //"angrylion" | "none"
   bool homebrewMode = false;
+  bool recompiler = true;  //false runs the CPU interpreter (exact cache fetch order)
 
   auto setRenderer(const nall::string& name) -> void;
 
@@ -130,6 +131,13 @@ struct EmulatorRunner : ares::Platform {
   auto rspTraceCommand(const nall::string& name, s32 ovl, s32 cmd, u32 occurrences,
                        u32 timeoutFrames, nall::string& outText, u32& outCount,
                        bool& outTruncated) -> nall::string;
+
+  //--- CPU execution trace -------------------------------------------------
+  //Binary trace of executed KSEG0 PC ranges, icache fills and VI tick marks for
+  //offline instruction-cache analysis (see CPU::ExecTrace; requires
+  //ARES_ENABLE_DEBUG_TOOLS). Both return "" on success or an error message.
+  auto cpuTraceStart(const nall::string& path, u64 maxBytes) -> nall::string;
+  auto cpuTraceStop(ares::Nintendo64::CPU::ExecTrace::Stats& out) -> nall::string;
 
   //--- ISViewer log --------------------------------------------------------
   nall::string logText;  //accumulated (main thread only); echoed to stdout live

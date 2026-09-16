@@ -272,6 +272,61 @@ continuously) rather than a single huge `waitFrames`.
   Typical use: trace the same command in two ucode builds and diff the cycle
   columns to find where schedules diverge.
 
+## `ares` - CPU execution trace (instruction cache analysis)
+
+Records which CPU code ran, in order, so an external tool can replay it against
+the VR4300 instruction cache, e.g. to evaluate a different code layout without
+running the game again.
+Requires an ares build with `ARES_ENABLE_DEBUG_TOOLS`.
+
+| Function | Description |
+| --- | --- |
+| `setRecompiler(enabled)` | Before `loadRom`. `false` runs the CPU interpreter: slower, but it fetches every instruction through the modelled cache the way the hardware does. Use it when a trace must reproduce the emulator's cache behaviour exactly |
+| `cpuTraceStart(path, {maxBytes?})` | Start writing a trace to `path`. The file begins with the current content of all 512 icache lines. Recording stops once `maxBytes` (default: unlimited) is reached |
+| `cpuTraceStop()` | Finish the file. → `{ records, instructions, uncached, fills, frames, bytes, truncated, icacheHits, icacheMisses }` |
+| `cpuCacheStats()` | → `{ cpuCycles, icacheHits, icacheMisses }`, running totals of the core's counters |
+| `writeFile(path, text)` | Write a UTF-8 text file. Scripts have no libc module, and a capture usually drops a small JSON sidecar next to its trace recording which build produced it |
+| `fileSha256(path)` | Lower-case hex SHA-256 of a file on disk, e.g. the ELF a traced ROM was built from |
+
+`instructions` counts instructions executed in KSEG0 (the cached segment),
+`uncached` everything else, and `fills` every icache line fill while tracing,
+for both CPU executors. `icacheHits`/`icacheMisses` are deltas of the core's
+counters, which the recompiler only maintains in homebrew mode, so prefer
+`fills` for exact miss counts.
+
+Tracing calls a hook per instruction, which slows emulation down noticeably, and
+the file grows by 12 bytes per non-sequential jump (back-to-back repeats of the
+same range fold into one record). Capture short, representative windows:
+
+```js
+ares.setHomebrew(true);
+ares.setRecompiler(false);             // exact cache replay
+ares.loadRom(ares.args[0]);
+ares.resume();
+if (!ares.waitLog("GAME READY", 60)) throw new Error("game did not start");
+ares.cpuTraceStart("capture.xtrace", {maxBytes: 2 ** 30});
+ares.waitFrames(120);
+console.log(ares.cpuTraceStop());
+```
+
+File format, all little-endian. A 2080-byte header: magic `P64XTRC1`, `u32`
+version (1), `u32` header size, `u32` line count (512), `u32` flags (bit 0:
+recompiler enabled), `u64` CPU cycles at start, then one `u32` per icache line
+with the physical address of its content (`0xffffffff` = invalid). Then 12-byte
+records `u32 a, u32 b, u32 typeAndCount`, type in the top 4 bits:
+
+| Type | Record | Fields |
+| --- | --- | --- |
+| 0 | range | instructions `[a, b)` (KSEG0 virtual PCs) ran sequentially, repeated `count` (low 28 bits) times in a row |
+| 1 | frame | a VI tick ended: `a` = frame number, `b` = low 32 bits of CPU cycles |
+| 2 | fill | the icache line at physical address `a` was filled |
+| 3 | uncached | `a` instructions ran outside KSEG0 |
+| 4 | reset | the machine was powered or reset: every line is invalid |
+| 15 | totals | written by `cpuTraceStop()`; low bits 0: `a`/`b` = instruction count (low/high word), 1: fill count, 2: `a` bit 0 = truncated, `b` = frames |
+
+Ranges are split at every fill, so fetches and fills appear in exactly the order
+the emulated cache saw them.
+
 ## `ares` - ROM log (ISViewer)
 
 Text the ROM prints through the IS-Viewer channel - libdragon's `debugf()` and

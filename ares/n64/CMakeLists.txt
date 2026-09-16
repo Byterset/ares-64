@@ -161,6 +161,7 @@ ares_add_sources(
     cpu/debugger.cpp
     cpu/disassembler.cpp
     cpu/exceptions.cpp
+    cpu/exectrace.cpp
     cpu/interpreter-cop2.cpp
     cpu/interpreter-fpu.cpp
     cpu/interpreter-ipu.cpp

@@ -26,10 +26,12 @@ set(
 
 add_subdirectory(ares)
 add_subdirectory(mia)
-add_subdirectory(desktop-ui)
 
 if(ARES_BUILD_HEADLESS)
+  # the headless runner has no window and bundles no runtime dependencies
   add_subdirectory(test-runner)
+else()
+  add_subdirectory(desktop-ui)
 endif()
 
 

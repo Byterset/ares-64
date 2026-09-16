@@ -592,6 +592,7 @@ auto CPU::Profiler::clearStats() -> void {
 
 auto CPU::profileCacheFill(u8 kind, u32 address) -> u64 {
 #if ARES_DEBUG_TOOLS
+  if(kind == Profiler::CacheIFill && unlikely(execTrace.active())) execTrace.onIcacheFill(address);
   if(!profiler.enabled.load(std::memory_order_relaxed)) return 0;
   return profiler.onCacheFill(kind, address);
 #else
@@ -616,7 +617,8 @@ auto CPU::profileCacheEvict(u64 eventId, u16 readMask, u16 writeMask) -> void {
 auto CPU::updatePrologueHook() -> void {
 #if ARES_DEBUG_TOOLS
   if constexpr(Accuracy::CPU::Recompiler) {
-    bool want = debugger.tracer.instruction->enabled() || profiler.enabled.load(std::memory_order_relaxed);
+    bool want = debugger.tracer.instruction->enabled() || profiler.enabled.load(std::memory_order_relaxed)
+             || execTrace.active();
     if(recompiler.callInstructionPrologue != want) {
       recompiler.callInstructionPrologue = want;
       recompiler.reset();

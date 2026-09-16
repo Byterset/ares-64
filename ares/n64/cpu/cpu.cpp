@@ -24,6 +24,7 @@ CPU cpu;
 #include "disassembler.cpp"
 #include "emux.cpp"
 #include "profiler.cpp"
+#include "exectrace.cpp"
 
 auto CPU::load(Node::Object parent) -> void {
   node = parent->append<Node::Object>("CPU");
@@ -206,10 +207,14 @@ auto CPU::instructionPrologue(u64 address, u32 instruction) -> void {
     profiler.onInstruction(address, instruction);
     profiler.onCacheTouch(address, instruction);
   }
+  if(unlikely(execTrace.active())) execTrace.onInstruction(address);
 #endif
 }
 
 auto CPU::icacheFillLine(u64 vaddr, u32 paddr) -> void {
+  //the recompiler's out-of-line refill: count it like the inline refill does,
+  //or misses vanish from the counters whenever the prologue hook is compiled in
+  if(system.homebrewMode) profile.icacheMisses++;
   icache.line(vaddr).fill(paddr, *this);
 }
 
@@ -248,6 +253,7 @@ auto CPU::power(bool reset) -> void {
   fenv.setRound(float_env::toNearest);
   context.setMode();
   profiler.power();
+  execTrace.onPower();
 
   if constexpr(Accuracy::CPU::Recompiler) {
     auto buffer = ares::Memory::FixedAllocator::get().tryAcquire(63_MiB);

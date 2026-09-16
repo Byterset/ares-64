@@ -3,8 +3,8 @@
 # -DARES_ENABLE_VULKAN=OFF (the linux-headless preset) so parallel-rdp is not
 # compiled at all, but also builds in a normal tree for local use.
 
-if(NOT (OS_LINUX OR OS_FREEBSD OR OS_OPENBSD))
-  message(WARNING "ares-test is only supported on Linux/BSD; skipping")
+if(NOT (OS_LINUX OR OS_FREEBSD OR OS_OPENBSD OR OS_WINDOWS))
+  message(WARNING "ares-test is only supported on Linux/BSD/Windows; skipping")
   return()
 endif()
 
